@@ -1,0 +1,9 @@
+# research material: cloned upstream docs and packed SDKs, not part of the product
+/_research/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# local scratch
+*.tmp
