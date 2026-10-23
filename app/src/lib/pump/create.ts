@@ -22,6 +22,7 @@ import {
   type AccountMeta,
 } from "@solana/web3.js";
 import { serverRpcUrl } from "@/lib/solana/rpc";
+import { assertTxFits } from "./tx-limit.ts";
 
 export const METADATA_LIMITS = { name: 32, symbol: 13, uri: 200 } as const;
 
@@ -134,6 +135,7 @@ export async function buildCreateTransaction(input: CreateLaunchInput): Promise<
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction({ feePayer: user, recentBlockhash: blockhash }).add(createInstruction);
+  assertTxFits(tx, "create_v2 transaction"); // 1,232-byte ceiling, see tx-limit.ts
 
   return {
     transaction: tx

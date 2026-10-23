@@ -19,6 +19,7 @@
 import { PUMP_SDK, type Shareholder } from "@pump-fun/pump-sdk";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import { serverRpcUrl } from "@/lib/solana/rpc";
+import { assertTxFits } from "./tx-limit.ts";
 
 export const TOTAL_BPS = 10_000;
 export const MAX_SHAREHOLDERS = 10;
@@ -125,6 +126,7 @@ async function serialize(ixs: Awaited<ReturnType<typeof PUMP_SDK.createFeeSharin
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction({ feePayer, recentBlockhash: blockhash });
   for (const ix of ixs) tx.add(ix);
+  assertTxFits(tx, "fee-sharing transaction"); // 1,232-byte ceiling, see tx-limit.ts
   return {
     transaction: tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64"),
     recentBlockhash: blockhash,
