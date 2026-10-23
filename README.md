@@ -95,12 +95,16 @@ node scripts/encrypt-treasury.ts
 
 ## Deploy to Vercel
 
+Full settings, the build-vs-runtime split for every variable, and the post-deploy steps live in
+[`VERCEL-CHECKLIST.md`](./VERCEL-CHECKLIST.md). The short version:
+
 1. Import the GitHub repo in Vercel.
 2. **Root Directory: `app`** (the Next app lives in `app/`, the repo root holds the docs).
 3. Framework preset: Next.js. Build command `npm run build`. Install `npm install`. No extra output config.
 4. Add every variable from the table above in **Settings → Environment Variables** (Production +
    Preview). `NEXT_PUBLIC_*` values are shipped to the browser; everything else stays server-side.
-5. Deploy. After the domain is assigned, set `NEXT_PUBLIC_APP_URL` to it and redeploy once so
+5. Remember `NEXT_PUBLIC_*` values are inlined at **build** time: set them before the first build.
+6. Deploy. After the domain is assigned, set `NEXT_PUBLIC_APP_URL` to it and redeploy once so
    absolute links resolve.
 
 ### Not on localhost
