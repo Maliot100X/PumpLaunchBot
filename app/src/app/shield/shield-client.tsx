@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { Keypair, Transaction } from "@solana/web3.js";
 import { Alert, Badge, Button, Card, EmptyState, Field, SectionTitle, inputClass } from "@/components/ui";
 
 /**
@@ -42,11 +44,61 @@ type RecreatePlan = {
 type RecreateResponse = {
   ok?: boolean;
   plan?: RecreatePlan;
+  /** The route's plan carries the artwork URL; `image` is the pinned record for it. */
+  image?: { url: string | null; cid: string | null; model: string } | null;
   metadataUri?: string | null;
-  feeSplit?: { userBps: number; platformBps: number };
+  feeSplit?: { userBps: number; platformBps: number; mode?: string };
+  treasury?: string | null;
+  model?: string;
+  fallback?: boolean;
   warnings?: string[];
   error?: string;
   detail?: string;
+};
+
+/**
+ * The shape POST /api/shield/launch returns. Only the fields the UI actually reads are typed;
+ * anything optional is optional here too, because a route can legitimately omit a link set.
+ */
+type LaunchPlan = {
+  ok?: boolean;
+  mode?: "self" | "sponsored";
+  note?: string;
+  launch?: {
+    mint: string;
+    mintSecretKey: number[] | null;
+    mintWasGenerated: boolean;
+    name: string;
+    symbol: string;
+    metadataUri: string;
+    payer: string;
+    creator: string;
+    treasury: string;
+  };
+  feeSharing?: {
+    shares: { address: string; bps: number }[];
+    splitMode: "split" | "treasury-only";
+    createConfig: string;
+    updateShares: string | null;
+    note?: string;
+    userBps: number;
+    platformBps: number;
+  };
+  create?: {
+    transaction: string;
+    simulation: { ok: boolean; err?: string | null; logs?: string[] | null; unitsConsumed?: number | null };
+  };
+  links?: {
+    mint?: string;
+    pumpFun?: string;
+    dexScreener?: string;
+    explorer?: string;
+    platformExplore?: string;
+    platformExploreAbsolute?: string;
+  };
+  warnings?: string[];
+  error?: string;
+  detail?: string | string[];
 };
 
 function usd(v: number | null): string {
@@ -283,6 +335,8 @@ const VERDICT_CLASS: Record<Signal["verdict"], string> = {
 /* ----------------------------------------------------------------------- view */
 
 export function ShieldClient({ initialMint }: { initialMint: string }) {
+  const { connection } = useConnection();
+  const { publicKey, sendTransaction, connected } = useWallet();
   const [mint, setMint] = useState(initialMint);
   const [token, setToken] = useState<Token | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -296,6 +350,19 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
   const [editDescription, setEditDescription] = useState("");
 
   const lookedUp = useRef("");
+
+  /* ---- launch half: fee wallet, mode, plan, and the sign/send trail ---- */
+  const [feeWallet, setFeeWallet] = useState("");
+  const [launchMode, setLaunchMode] = useState<"self" | "sponsored">("sponsored");
+  const [launchPlan, setLaunchPlan] = useState<LaunchPlan | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendLog, setSendLog] = useState<string[]>([]);
+  const [signatures, setSignatures] = useState<string[]>([]);
+
+  const walletAddress = publicKey?.toBase58() ?? null;
 
   async function runScan(value: string) {
     if (!value) {
@@ -365,6 +432,131 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
   }
 
   const recreateTarget = token?.mint ?? mint.trim();
+
+  /* ------------------------------------------------------------- prepare the launch */
+
+  async function prepareLaunch() {
+    setLaunchError(null);
+    setSignatures([]);
+    setSendLog([]);
+
+    const proposal = plan; // the recreate response
+    if (!proposal?.plan) {
+      setLaunchError("Prepare a recreate plan first — the launch needs a name, ticker and artwork.");
+      return;
+    }
+    if (!proposal.image?.url) {
+      setLaunchError(
+        "This plan has no pinned artwork, and pump.fun metadata must point at an image. Re-run Prepare recreate.",
+      );
+      return;
+    }
+    if (launchMode === "self" && !walletAddress) {
+      setLaunchError("Self launch is signed by your wallet — connect a Solana wallet first.");
+      return;
+    }
+
+    setLaunching(true);
+    try {
+      const res = await fetch("/api/shield/launch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceMint: recreateTarget || undefined,
+          name: editName.trim() || proposal.plan.name,
+          symbol: editSymbol.trim() || proposal.plan.symbol,
+          description: editDescription.trim() || proposal.plan.description,
+          imageUri: proposal.image.url,
+          mode: launchMode,
+          user: launchMode === "self" ? walletAddress ?? undefined : undefined,
+          feeWallet: feeWallet.trim() || undefined,
+        }),
+      });
+      const body = (await res.json().catch(() => null)) as LaunchPlan | null;
+      if (!res.ok || !body || body.ok === false || !body.launch) {
+        setLaunchError(
+          Array.isArray(body?.detail)
+            ? body.detail.join(" · ")
+            : (body?.detail as string) ?? body?.error ?? `launch prepare failed (${res.status})`,
+        );
+        return;
+      }
+      setLaunchPlan(body);
+    } catch (err) {
+      setLaunchError(err instanceof Error ? err.message : "network error");
+    } finally {
+      setLaunching(false);
+    }
+  }
+
+  /* ------------------------------------------------- sign and send (self mode only) */
+
+  async function signAndSend() {
+    setSendError(null);
+    if (!launchPlan?.launch || !launchPlan.create || !launchPlan.feeSharing) return;
+    if (!publicKey || !sendTransaction) {
+      setSendError("Connect a Solana wallet — this path is signed by you, not by the platform.");
+      return;
+    }
+
+    const log = (line: string) => setSendLog((lines) => [...lines, line]);
+    setSending(true);
+
+    /** Re-stamp a fresh blockhash: a plan can sit on screen long enough to expire. */
+    async function fresh(tx: Transaction): Promise<Transaction> {
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      return tx;
+    }
+
+    try {
+      // 1 · create_v2. The mint keypair the route generated must also sign, which is why its secret
+      //     is returned exactly once. The connected wallet is the fee payer.
+      const createTx = Transaction.from(Buffer.from(launchPlan.create.transaction, "base64"));
+      if (launchPlan.launch.mintSecretKey) {
+        createTx.partialSign(Keypair.fromSecretKey(Uint8Array.from(launchPlan.launch.mintSecretKey)));
+      }
+      const sigCreate = await sendTransaction(await fresh(createTx), connection, {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      log(`1/3 create_v2 sent · ${sigCreate}`);
+      await connection.confirmTransaction(sigCreate, "confirmed");
+      log("1/3 create_v2 confirmed — the coin now exists on pump.fun");
+      setSignatures((s) => [...s, sigCreate]);
+
+      // 2 · create_fee_sharing_config. Separate transaction on purpose: packed together with create
+      //     the three instructions are ~1,280 bytes and pump's ceiling is 1,232.
+      const cfgTx = Transaction.from(Buffer.from(launchPlan.feeSharing.createConfig, "base64"));
+      const sigConfig = await sendTransaction(await fresh(cfgTx), connection, {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      log(`2/3 fee-sharing config sent · ${sigConfig}`);
+      await connection.confirmTransaction(sigConfig, "confirmed");
+      log("2/3 fee-sharing config confirmed");
+      setSignatures((s) => [...s, sigConfig]);
+
+      // 3 · update_fee_shares_v2 — this is the permanent split, and it revokes the admin.
+      if (launchPlan.feeSharing.updateShares) {
+        const upTx = Transaction.from(Buffer.from(launchPlan.feeSharing.updateShares, "base64"));
+        const sigShares = await sendTransaction(await fresh(upTx), connection, {
+          skipPreflight: false,
+          maxRetries: 3,
+        });
+        log(`3/3 fee shares sent · ${sigShares}`);
+        await connection.confirmTransaction(sigShares, "confirmed");
+        log("3/3 fee shares confirmed — the split is now permanent on chain");
+        setSignatures((s) => [...s, sigShares]);
+      } else {
+        log("3/3 no share update was built, so the config keeps its default single creator share");
+      }
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "the wallet or the cluster rejected the transaction");
+    } finally {
+      setSending(false);
+    }
+  }
 
   return (
     <div className="mt-5">
@@ -612,10 +804,10 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
           {plan?.plan ? (
             <div className="mt-5 border-t border-white/10 pt-4">
               <div className="flex items-start gap-4">
-                {plan.plan.imageUrl ? (
+                {plan.image?.url ?? plan.plan.imageUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element -- generated art, arbitrary host
                   <img
-                    src={plan.plan.imageUrl}
+                    src={(plan.image?.url ?? plan.plan.imageUrl) as string}
                     alt=""
                     width={96}
                     height={96}
@@ -624,23 +816,28 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
                   />
                 ) : (
                   <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-md border border-dashed border-white/15 text-center text-[10px] text-white/35">
-                    no image returned
+                    no artwork — the image step was skipped or failed, and the launch needs one
                   </div>
                 )}
                 <div className="min-w-0">
-                  <p className="text-xs text-white/40">Proposed identity — edit before launch wiring lands</p>
-                  {plan.metadataUri ? (
+                  <p className="text-xs text-white/40">
+                    Proposed identity — edit anything below before launching
+                  </p>
+                  {plan.image?.cid ? (
                     <p className="mt-1 break-all font-mono text-[11px] text-white/45">
-                      metadata URI: {plan.metadataUri}
+                      artwork pinned: {plan.image.cid} ({plan.image.model})
                     </p>
-                  ) : (
-                    <p className="mt-1 text-[11px] text-white/40">no metadata URI returned by the route.</p>
-                  )}
+                  ) : null}
                   {plan.plan.imagePrompt ? (
                     <p className="mt-1 text-[11px] leading-relaxed text-white/40">
                       prompt: {plan.plan.imagePrompt}
                     </p>
                   ) : null}
+                  <p className="mt-1 text-[11px] leading-relaxed text-white/40">
+                    {plan.fallback
+                      ? "This plan was derived from the token's own metadata — the model was not reachable for this request."
+                      : `Rewritten by ${plan.model ?? "the model"}.`}
+                  </p>
                 </div>
               </div>
 
@@ -677,14 +874,219 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
                 </Field>
               </div>
 
-              <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Button type="button" disabled>
-                  Ready to launch
-                </Button>
-                <p className="text-[11px] leading-relaxed text-white/40">
-                  Disabled on purpose: launch wiring lands in the launch tab. Nothing is signed, sent or
-                  funded from this screen.
+              <div className="mt-5 border-t border-white/10 pt-4">
+                <p className="text-xs text-white/40">Launch this plan</p>
+
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <Field label="Wallet that receives your 70% (optional)" id="fee-wallet">
+                    <input
+                      id="fee-wallet"
+                      name="feeWallet"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={feeWallet}
+                      onChange={(e) => setFeeWallet(e.target.value)}
+                      placeholder="your Solana wallet"
+                      className={`font-mono text-xs ${inputClass}`}
+                    />
+                  </Field>
+
+                  <Field label="Who pays the launch" id="launch-mode">
+                    <select
+                      id="launch-mode"
+                      name="launchMode"
+                      value={launchMode}
+                      onChange={(e) => setLaunchMode(e.target.value as "self" | "sponsored")}
+                      className={inputClass}
+                    >
+                      <option value="sponsored">Platform-sponsored — the treasury pays and signs</option>
+                      <option value="self">Self launch — my wallet pays and signs everything</option>
+                    </select>
+                  </Field>
+                </div>
+
+                <p className="mt-2 text-[11px] leading-relaxed text-white/40">
+                  {launchMode === "sponsored"
+                    ? "The platform treasury is the creator of record and pays the pump.fun costs. You only name the wallet that takes your share."
+                    : connected
+                      ? `Your connected wallet ${walletAddress?.slice(0, 4)}…${walletAddress?.slice(-4)} pays every cost and is the creator — the fees are yours.`
+                      : "Self launch is signed by your wallet: connect one in the header first, then come back."}
+                  {!feeWallet.trim()
+                    ? " With no wallet named, the treasury keeps 100% of the creator fees — the program rejects an empty shareholder list."
+                    : ""}
                 </p>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button type="button" onClick={() => void prepareLaunch()} disabled={launching}>
+                    {launching ? "Building the launch…" : "Prepare launch"}
+                  </Button>
+                  {launchMode === "self" ? (
+                    <Button
+                      type="button"
+                      onClick={() => void signAndSend()}
+                      disabled={sending || !launchPlan?.create}
+                    >
+                      {sending ? "Sending…" : "Sign & send (3 transactions)"}
+                    </Button>
+                  ) : null}
+                </div>
+
+                <div aria-live="polite">
+                  {launchError ? (
+                    <div className="mt-4">
+                      <Alert tone="error" title="Launch prepare failed">
+                        {launchError}
+                      </Alert>
+                    </div>
+                  ) : null}
+                  {sendError ? (
+                    <div className="mt-4">
+                      <Alert tone="error" title="The transaction was not sent">
+                        {sendError}
+                      </Alert>
+                    </div>
+                  ) : null}
+                </div>
+
+                {launchPlan?.warnings && launchPlan.warnings.length > 0 ? (
+                  <div className="mt-4">
+                    <Alert tone="warn" title="Warnings from the launch route">
+                      <ul className="list-disc space-y-1 pl-4">
+                        {launchPlan.warnings.map((w) => (
+                          <li key={w}>{w}</li>
+                        ))}
+                      </ul>
+                    </Alert>
+                  </div>
+                ) : null}
+
+                {launchPlan?.launch && launchPlan.feeSharing ? (
+                  <div className="mt-4 rounded-md border border-white/10 bg-white/[0.02] p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone={launchPlan.feeSharing.splitMode === "split" ? "ok" : "neutral"}>
+                        {launchPlan.feeSharing.splitMode === "split" ? "70 / 30 split set" : "treasury keeps 100%"}
+                      </Badge>
+                      <span className="text-xs text-white/45">
+                        mode {launchPlan.mode} · payer {launchPlan.launch.payer.slice(0, 4)}…
+                        {launchPlan.launch.payer.slice(-4)}
+                      </span>
+                    </div>
+
+                    <ul className="mt-3 space-y-1 text-xs">
+                      {launchPlan.feeSharing.shares.map((s) => (
+                        <li key={s.address} className="break-all font-mono text-[11px] text-white/60">
+                          {s.address} · {(s.bps / 100).toFixed(2)}% ({s.bps} bps)
+                          {s.address === launchPlan.launch?.treasury ? " · platform treasury" : " · yours"}
+                        </li>
+                      ))}
+                    </ul>
+
+                    <dl className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                      <div className="rounded-md border border-white/10 p-2">
+                        <dt className="text-white/40">create_v2 simulation</dt>
+                        <dd className={`tabular mt-1 font-medium ${launchPlan.create?.simulation.ok ? "text-emerald-300" : "text-amber-300"}`}>
+                          {launchPlan.create?.simulation.ok ? "ok" : "failed"}
+                        </dd>
+                      </div>
+                      <div className="rounded-md border border-white/10 p-2">
+                        <dt className="text-white/40">Mint</dt>
+                        <dd className="mt-1 break-all font-mono text-[10px]">{launchPlan.launch.mint.slice(0, 10)}…</dd>
+                      </div>
+                      <div className="rounded-md border border-white/10 p-2">
+                        <dt className="text-white/40">Transactions</dt>
+                        <dd className="tabular mt-1 font-medium">3 max, never packed</dd>
+                      </div>
+                      <div className="rounded-md border border-white/10 p-2">
+                        <dt className="text-white/40">Sent</dt>
+                        <dd className="tabular mt-1 font-medium">
+                          {signatures.length > 0 ? `${signatures.length} sent` : "nothing"}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    {!launchPlan.create?.simulation.ok && launchPlan.create?.simulation.err ? (
+                      <p className="mt-2 break-all font-mono text-[10px] text-amber-300/80">
+                        {launchPlan.create.simulation.err}
+                      </p>
+                    ) : null}
+
+                    <p className="mt-2 break-all font-mono text-[10px] text-white/40">
+                      metadata {launchPlan.launch.metadataUri}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                      {launchPlan.links?.pumpFun ? (
+                        <a
+                          href={launchPlan.links.pumpFun}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded border border-white/10 px-2 py-1 text-white/70 hover:border-white/25 hover:text-white"
+                        >
+                          pump.fun coin page
+                        </a>
+                      ) : null}
+                      {launchPlan.links?.platformExplore ? (
+                        <a
+                          href={launchPlan.links.platformExplore}
+                          className="rounded border border-white/10 px-2 py-1 text-white/70 hover:border-white/25 hover:text-white"
+                        >
+                          our explore view
+                        </a>
+                      ) : null}
+                      {launchPlan.links?.explorer ? (
+                        <a
+                          href={launchPlan.links.explorer}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded border border-white/10 px-2 py-1 text-white/70 hover:border-white/25 hover:text-white"
+                        >
+                          solscan
+                        </a>
+                      ) : null}
+                      {launchPlan.links?.dexScreener ? (
+                        <a
+                          href={launchPlan.links.dexScreener}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded border border-white/10 px-2 py-1 text-white/70 hover:border-white/25 hover:text-white"
+                        >
+                          dexscreener
+                        </a>
+                      ) : null}
+                    </div>
+
+                    <p className="mt-2 text-[11px] leading-relaxed text-white/40">
+                      {launchPlan.note}
+                    </p>
+
+                    {sendLog.length > 0 ? (
+                      <ol className="mt-3 space-y-1 border-t border-white/10 pt-3">
+                        {sendLog.map((line) => (
+                          <li key={line} className="break-all font-mono text-[10px] text-white/55">
+                            {line}
+                          </li>
+                        ))}
+                      </ol>
+                    ) : null}
+
+                    {signatures.length > 0 ? (
+                      <ul className="mt-2 space-y-1">
+                        {signatures.map((sig) => (
+                          <li key={sig}>
+                            <a
+                              href={`https://solscan.io/tx/${sig}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="break-all font-mono text-[10px] text-[#8f9bff] hover:underline"
+                            >
+                              {sig}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
