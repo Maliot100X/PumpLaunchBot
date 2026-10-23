@@ -44,6 +44,8 @@ type RecreatePlan = {
 type RecreateResponse = {
   ok?: boolean;
   plan?: RecreatePlan;
+  /** The route echoes what it read: { mint, name, symbol } of the source token. */
+  source?: { mint: string; name?: string; symbol?: string } | null;
   /** The route's plan carries the artwork URL; `image` is the pinned record for it. */
   image?: { url: string | null; cid: string | null; model: string } | null;
   metadataUri?: string | null;
@@ -88,6 +90,7 @@ type LaunchPlan = {
     transaction: string;
     simulation: { ok: boolean; err?: string | null; logs?: string[] | null; unitsConsumed?: number | null };
   };
+  source?: { mint: string } | null;
   links?: {
     mint?: string;
     pumpFun?: string;
@@ -500,6 +503,7 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
     }
 
     const log = (line: string) => setSendLog((lines) => [...lines, line]);
+    const sent: string[] = [];
     setSending(true);
 
     /** Re-stamp a fresh blockhash: a plan can sit on screen long enough to expire. */
@@ -523,7 +527,8 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
       log(`1/3 create_v2 sent · ${sigCreate}`);
       await connection.confirmTransaction(sigCreate, "confirmed");
       log("1/3 create_v2 confirmed — the coin now exists on pump.fun");
-      setSignatures((s) => [...s, sigCreate]);
+      sent.push(sigCreate);
+      setSignatures([...sent]);
 
       // 2 · create_fee_sharing_config. Separate transaction on purpose: packed together with create
       //     the three instructions are ~1,280 bytes and pump's ceiling is 1,232.
@@ -535,7 +540,8 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
       log(`2/3 fee-sharing config sent · ${sigConfig}`);
       await connection.confirmTransaction(sigConfig, "confirmed");
       log("2/3 fee-sharing config confirmed");
-      setSignatures((s) => [...s, sigConfig]);
+      sent.push(sigConfig);
+      setSignatures([...sent]);
 
       // 3 · update_fee_shares_v2 — this is the permanent split, and it revokes the admin.
       if (launchPlan.feeSharing.updateShares) {
@@ -547,9 +553,43 @@ export function ShieldClient({ initialMint }: { initialMint: string }) {
         log(`3/3 fee shares sent · ${sigShares}`);
         await connection.confirmTransaction(sigShares, "confirmed");
         log("3/3 fee shares confirmed — the split is now permanent on chain");
-        setSignatures((s) => [...s, sigShares]);
+        sent.push(sigShares);
+        setSignatures([...sent]);
       } else {
         log("3/3 no share update was built, so the config keeps its default single creator share");
+      }
+
+      // Record it on the platform's own board. This runs LAST and only here, so LaunchLab can never
+      // list a coin that was merely planned — only one that actually confirmed.
+      try {
+        const reg = await fetch("/api/registry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mint: launchPlan.launch.mint,
+            name: launchPlan.launch.name,
+            symbol: launchPlan.launch.symbol,
+            metadataUri: launchPlan.launch.metadataUri,
+            imageUri: plan?.image?.url ?? null,
+            mode: "self",
+            payer: launchPlan.launch.payer,
+            creator: launchPlan.launch.creator,
+            feeWallet: launchPlan.feeSharing.shares.find((s) => s.address !== launchPlan.launch?.treasury)?.address ?? null,
+            userBps: launchPlan.feeSharing.userBps,
+            platformBps: launchPlan.feeSharing.platformBps,
+            signatures: sent,
+            sourceMint: plan?.source?.mint ?? null,
+          }),
+        });
+        log(
+          reg.ok
+            ? "recorded on the LaunchLab board"
+            : `on chain, but the board write failed (${reg.status}) — the coin is real, the listing is not yet`,
+        );
+      } catch (err) {
+        log(
+          `on chain, but the board write failed: ${err instanceof Error ? err.message : "unknown"} — the coin is real, the listing is not yet`,
+        );
       }
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "the wallet or the cluster rejected the transaction");

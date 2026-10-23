@@ -47,6 +47,7 @@ const GROUPS: Group[] = [
     tabs: [
       { href: "/explore", label: "Explore" },
       { href: "/launched", label: "Launched" },
+      { href: "/launchlab", label: "LaunchLab" },
     ],
   },
   {
