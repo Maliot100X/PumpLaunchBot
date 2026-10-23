@@ -4,6 +4,7 @@ import "./globals.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import { SolanaProvider } from "@/components/providers/solana-provider";
 import { Nav } from "@/components/nav";
+import { BotDock } from "@/components/bot-dock";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -48,6 +49,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <main id="main" className="flex-1">
             {children}
           </main>
+          {/* The bot is reachable from every page, not buried in a tab. */}
+          <BotDock />
         </SolanaProvider>
       </body>
     </html>
