@@ -10,6 +10,8 @@
  * (measured). DexScreener has no description field. DAS is the reliable source.
  */
 
+import { serverRpcUrl } from "@/lib/solana/rpc";
+
 export type DasAsset = {
   id: string;
   content?: {
@@ -36,17 +38,20 @@ export type OffChainMetadata = {
 
 type RpcResponse<T> = { result?: T; error?: { code: number; message: string } };
 
-function rpcUrl(): string {
-  const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL?.trim();
-  if (url && url.includes("api-key=") && url.split("api-key=")[1].length > 0) return url;
-  throw new Error("NEXT_PUBLIC_SOLANA_RPC_URL is not configured (needs the Helius key)");
+function heliusUrl(): string {
+  const url = serverRpcUrl(true);
+  const key = url.includes("api-key=") ? url.split("api-key=")[1] : "";
+  if (key.length === 0) {
+    throw new Error("the configured RPC endpoint carries no api-key — Helius DAS requires one (set SOLANA_RPC_URL)");
+  }
+  return url;
 }
 
 async function rpc<T>(method: string, params: unknown, timeoutMs = 12_000): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(rpcUrl(), {
+    const res = await fetch(heliusUrl(), {
       method: "POST",
       signal: ctrl.signal,
       headers: { "content-type": "application/json" },

@@ -21,6 +21,7 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { serverRpcUrl } from "@/lib/solana/rpc";
 
 const SCRYPT_KEYLEN = 32;
 const IV_LEN = 12;
@@ -83,8 +84,7 @@ export const RENT_PER_LAUNCH_LAMPORTS = 3_342_480;
 export const PAYER_RESERVE_LAMPORTS = 650_240;
 
 function rpcUrl(): string {
-  const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL?.trim();
-  if (!url) throw new Error("NEXT_PUBLIC_SOLANA_RPC_URL is not configured");
+  const url = serverRpcUrl(true);
   return url;
 }
 

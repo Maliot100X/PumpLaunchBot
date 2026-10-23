@@ -21,6 +21,7 @@ import {
   Transaction,
   type AccountMeta,
 } from "@solana/web3.js";
+import { serverRpcUrl } from "@/lib/solana/rpc";
 
 export const METADATA_LIMITS = { name: 32, symbol: 13, uri: 200 } as const;
 
@@ -86,8 +87,7 @@ export function validateLaunchInput(input: Partial<CreateLaunchInput>): Validati
 }
 
 export function rpcUrl(): string {
-  const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL?.trim();
-  if (!url) throw new Error("NEXT_PUBLIC_SOLANA_RPC_URL is not configured");
+  const url = serverRpcUrl(true);
   return url;
 }
 

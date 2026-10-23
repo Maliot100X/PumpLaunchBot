@@ -18,6 +18,7 @@
 
 import { PUMP_SDK, type Shareholder } from "@pump-fun/pump-sdk";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import { serverRpcUrl } from "@/lib/solana/rpc";
 
 export const TOTAL_BPS = 10_000;
 export const MAX_SHAREHOLDERS = 10;
@@ -115,8 +116,7 @@ export function resolveSplit(params: {
 }
 
 function connection(): Connection {
-  const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL?.trim();
-  if (!url) throw new Error("NEXT_PUBLIC_SOLANA_RPC_URL is not configured");
+  const url = serverRpcUrl(true);
   return new Connection(url, "confirmed");
 }
 

@@ -4,6 +4,8 @@
  * every number in here was measured while building; keep them in step.
  */
 
+import { rpcHost, rpcSource } from "@/lib/solana/rpc";
+
 export const PROJECT_KNOWLEDGE = `
 # PumpLaunchBot — what this platform is
 
@@ -75,7 +77,7 @@ in-app /explore?mint=<mint> · receipts at https://solscan.io/tx/<signature>.
 export function opsSummary(): string {
   const on = (v: string | undefined): string => (v && v.trim() !== "" ? "set" : "NOT set");
   return [
-    `RPC: ${on(process.env.NEXT_PUBLIC_SOLANA_RPC_URL)}`,
+    `RPC: ${rpcHost()} (source: ${rpcSource()})`,
     `Pinata: ${on(process.env.PINATA_JWT)}`,
     `Treasury keypair: ${on(process.env.TREASURY_KEYPAIR_ENCRYPTED)}`,
     `Treasury sending: ${process.env.TREASURY_LIVE === "true" ? "ENABLED" : "disabled"}`,

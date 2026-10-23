@@ -1,4 +1,5 @@
 import { PageHeader, Panel, Alert, SectionTitle, Badge } from "@/components/ui";
+import { rpcHost, rpcSource } from "@/lib/solana/rpc";
 
 /**
  * Settings tab — Phase 7/rework: reads the REAL environment instead of describing it.
@@ -9,16 +10,6 @@ import { PageHeader, Panel, Alert, SectionTitle, Badge } from "@/components/ui";
  */
 function configured(...names: string[]): boolean {
   return names.every((n) => (process.env[n] ?? "").trim().length > 0);
-}
-
-function rpcHost(): string {
-  const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL?.trim();
-  if (!url) return "not set — falling back to the public cluster (heavily rate limited)";
-  try {
-    return new URL(url).host;
-  } catch {
-    return "set, but not a parseable URL";
-  }
 }
 
 export default function SettingsPage() {
@@ -51,7 +42,7 @@ export default function SettingsPage() {
               ["Default fee split", `${process.env.FEE_SHARE_USER_BPS ?? "7000"} bps creator / ${process.env.FEE_SHARE_PLATFORM_BPS ?? "3000"} bps platform · must sum to 10000, max 10 wallets`],
               ["Metadata pinning", configured("PINATA_JWT") ? `Pinata v3 uploads API · gateway ${process.env.PINATA_GATEWAY?.trim() || "gateway.pinata.cloud"}` : "PINATA_JWT is not set — pinning will fail"],
               ["Image generation", `Pollinations · ${process.env.POLLINATIONS_IMAGE_MODEL ?? "black-forest-labs/flux.1-schnell"}${configured("POLLINATIONS_API_KEY") ? "" : " (no POLLINATIONS_API_KEY)"}`],
-              ["Solana RPC", rpcHost()],
+              ["Solana RPC", `${rpcHost()} · source ${rpcSource()}`],
               ["Treasury", configured("PLATFORM_TREASURY_PUBKEY", "TREASURY_KEYPAIR_ENCRYPTED", "TREASURY_KEYPAIR_PASSPHRASE") ? "encrypted keypair present — sponsored mode available" : "not configured — sponsored mode unavailable"],
             ] as [string, string][]
           ).map(([k, v]) => (
