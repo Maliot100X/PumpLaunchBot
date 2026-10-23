@@ -3,7 +3,9 @@ import { LaunchForm } from "./launch-form";
 
 /**
  * Launch tab. Phase 3 wires the real form: pin metadata → build create_v2 → simulate.
- * Sending stays off in this build; fee sharing and vanity grinding are Phases 4-5.
+ * Every step is wired: metadata pinning, the create_v2 build, the fee-sharing transactions and the
+ * vanity mint grinder. Only the final submit is gated (NEXT_PUBLIC_ENABLE_SEND), so this page can be
+ * exercised end to end without spending anything.
  */
 export default function LaunchPage() {
   return (
@@ -57,9 +59,11 @@ export default function LaunchPage() {
         </p>
       </section>
 
-      <p className="mt-6 text-xs text-white/40">
-        Not wired yet: the create transaction, the fee-sharing transaction and the grind step —
-        Phase 3-5. Nothing on this page sends a transaction today.{" "}
+      <p className="mt-6 text-xs leading-relaxed text-white/40">
+        What runs here today: metadata is pinned to IPFS, the create transaction is built against the real
+        pump.fun program and simulated against mainnet, the creator fee split is validated against the
+        10000-bps rule, and the vanity grinder produces the mint keypair in this browser. What does not
+        run: the submit itself — that needs <code className="font-mono">NEXT_PUBLIC_ENABLE_SEND=true</code>.{" "}
         <Link href="/explore" className="underline hover:text-white/70">
           Look a token up first
         </Link>

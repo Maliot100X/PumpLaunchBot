@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { inputClass } from "@/components/ui";
+import { VanityError, grindVanity, keypairFromResult } from "@/lib/vanity/grind";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, Transaction, type VersionedTransaction } from "@solana/web3.js";
 
@@ -37,18 +38,62 @@ export function LaunchForm() {
   const [result, setResult] = useState<PrepareResponse | null>(null);
   const [metadataUri, setMetadataUri] = useState("");
 
+  // Vanity grinding. The secret half stays in this component (a ref, so it never lands in a render
+  // snapshot) until the user signs — the server only ever sees the public address.
+  const mintKeypair = useRef<Keypair | null>(null);
+  const grindAbort = useRef<AbortController | null>(null);
+  const [prefix, setPrefix] = useState("");
+  const [suffix, setSuffix] = useState("");
+  const [ignoreCase, setIgnoreCase] = useState(true);
+  const [grind, setGrind] = useState<{ running: boolean; attempts: number; rate: number; expected: number } | null>(null);
+
   const say = useCallback((line: string) => setLog((l) => [...l, line]), []);
 
   const address = useMemo(() => publicKey?.toBase58() ?? "", [publicKey]);
 
   function generateMint() {
     const kp = Keypair.generate();
+    mintKeypair.current = kp;
     setMint(kp.publicKey.toBase58());
-    // The secret half must be kept by the user; in this build it is regenerated per launch
-    // and never sent to the server. Vanity grinding (Phase 5) replaces this step.
-    say(`generated mint ${kp.publicKey.toBase58()} (keep its secret key — it must sign the create)`);
-    // The keypair is intentionally not stored in state beyond its address in this phase.
-    void kp;
+    say(`generated mint ${kp.publicKey.toBase58()} — its secret key is held here and signs the create`);
+  }
+
+  /** Grind a mint whose address starts with the prefix and/or ends with the suffix. */
+  async function grindMint() {
+    if (grind?.running) {
+      grindAbort.current?.abort();
+      say("grind stopped");
+      return;
+    }
+    try {
+      grindAbort.current = new AbortController();
+      setGrind({ running: true, attempts: 0, rate: 0, expected: 0 });
+      const result = await grindVanity({
+        prefix,
+        suffix,
+        ignoreCase,
+        signal: grindAbort.current.signal,
+        onProgress: (p) => {
+          setGrind({ running: true, attempts: p.attempts, rate: p.rate, expected: p.expectedAttempts });
+        },
+      });
+      if (!result) {
+        say("grind stopped without a match");
+        setGrind(null);
+        return;
+      }
+      const kp = keypairFromResult(result);
+      mintKeypair.current = kp;
+      setMint(result.publicKey);
+      setGrind(null);
+      say(
+        `ground mint ${result.publicKey} after ${result.attempts.toLocaleString()} attempts in ` +
+          `${result.elapsedMs} ms — its secret key signs the create`,
+      );
+    } catch (err) {
+      setGrind(null);
+      say(`grind error: ${err instanceof VanityError || err instanceof Error ? err.message : "unknown"}`);
+    }
   }
 
   async function pin() {
@@ -124,9 +169,14 @@ export function LaunchForm() {
       const body = (await res.json()) as PrepareResponse;
       if (!res.ok || !body.built) throw new Error(body.detail ?? "prepare failed");
 
-      // The mint keypair that signs is NOT held server-side; in this phase the user signs
-      // with the wallet only and the mint must be supplied by the grind step (Phase 5).
+      // A pump.fun create needs the mint to sign as well as the payer. The mint keypair was created
+      // in this component (ground or generated) and never sent to the server, so it is partially
+      // signed here first and the wallet only has to add its own signature.
       const tx = Transaction.from(Buffer.from(body.built.transaction, "base64"));
+      const kp = mintKeypair.current;
+      if (!kp) throw new Error("no mint keypair in this browser — grind or generate the mint first");
+      if (kp.publicKey.toBase58() !== mint) throw new Error("the held keypair does not match the mint field");
+      tx.partialSign(kp);
       const signed = await signTransaction?.(tx as unknown as VersionedTransaction);
       if (!signed) throw new Error("wallet did not return a signed transaction");
       const sig = await connection.sendRawTransaction(signed.serialize());
@@ -182,12 +232,50 @@ export function LaunchForm() {
             <label className={label} htmlFor="f-site">Website (optional)</label>
             <input id="f-site" className={input} value={website} onChange={(e) => setWebsite(e.target.value)} />
           </div>
+          <div className="sm:col-span-2 rounded-md border border-white/10 bg-white/[0.015] p-3">
+            <p className="text-xs font-medium text-white/70">Vanity mint (optional)</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-white/40">
+              Grinds the mint address in this browser — the keypair never leaves the page and it is what
+              signs the create. Longer patterns take exponentially longer; 4–5 characters is the practical
+              range.
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
+              <div>
+                <label className={label} htmlFor="f-prefix">Starts with</label>
+                <input id="f-prefix" className={`${input} font-mono text-xs`} value={prefix} maxLength={6}
+                       onChange={(e) => setPrefix(e.target.value)} placeholder="e.g. pump" />
+              </div>
+              <div>
+                <label className={label} htmlFor="f-suffix">Ends with</label>
+                <input id="f-suffix" className={`${input} font-mono text-xs`} value={suffix} maxLength={6}
+                       onChange={(e) => setSuffix(e.target.value)} placeholder="e.g. 999" />
+              </div>
+              <label className="flex items-center gap-2 pb-2 text-[11px] text-white/55">
+                <input type="checkbox" checked={ignoreCase} onChange={(e) => setIgnoreCase(e.target.checked)} />
+                ignore case
+              </label>
+              <button
+                type="button"
+                onClick={grindMint}
+                className="rounded-md border border-white/15 px-3 py-2 text-xs hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#828fff]"
+              >
+                {grind?.running ? "stop" : "grind"}
+              </button>
+            </div>
+            {grind ? (
+              <p className="mt-2 font-mono text-[11px] text-white/50">
+                {grind.attempts.toLocaleString()} attempts · {grind.rate.toLocaleString()}/s ·{" "}
+                {grind.expected ? `budget ~${grind.expected.toLocaleString()}` : ""}
+              </p>
+            ) : null}
+          </div>
+
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-mint">Mint address</label>
             <div className="flex gap-2">
               <input id="f-mint" className={`${input} font-mono text-xs`} value={mint} onChange={(e) => setMint(e.target.value)} />
               <button type="button" onClick={generateMint} className="shrink-0 rounded-md border border-white/15 px-3 text-xs hover:bg-white/5">
-                generate
+                random
               </button>
             </div>
           </div>

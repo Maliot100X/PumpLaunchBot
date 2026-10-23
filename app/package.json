@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test tests/api.test.ts"
+    "test": "node --test tests/*.test.ts"
   },
   "dependencies": {
     "@pump-fun/pump-sdk": "^4.3.1",
