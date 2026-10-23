@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import { inputClass } from "@/components/ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, Transaction, type VersionedTransaction } from "@solana/web3.js";
 
@@ -149,8 +150,7 @@ export function LaunchForm() {
     return true;
   }
 
-  const input =
-    "w-full rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-sm outline-none placeholder:text-white/30 focus:border-[#5e6ad2]";
+  const input = inputClass;
   const label = "text-xs font-medium text-white/60";
 
   return (

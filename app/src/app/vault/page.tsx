@@ -3,6 +3,7 @@ import { connection } from "next/server";
 import { getTreasuryStatus, RENT_PER_LAUNCH_LAMPORTS, PAYER_RESERVE_LAMPORTS } from "@/lib/treasury";
 import { getPimlicoStatus } from "@/lib/pimlico";
 import { accountLink } from "@/lib/links";
+import { Alert, PageHeader, Panel, Skeleton, Stat } from "@/components/ui";
 
 /**
  * Vault / Treasury tab — Phase 7, wired to the live server code (no client fetch, no placeholders).
@@ -21,50 +22,13 @@ function sol(lamports: number | null): string {
   return `${(lamports / 1_000_000_000).toFixed(7)} SOL`;
 }
 
-function Card({ label, value, href }: { label: string; value: string; href?: string }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4">
-      <dt className="text-xs text-white/40">{label}</dt>
-      <dd className="mt-1 break-all font-mono text-sm">
-        {href ? (
-          <a href={href} target="_blank" rel="noopener noreferrer" className="underline decoration-white/20 hover:text-white">
-            {value}
-          </a>
-        ) : (
-          value
-        )}
-      </dd>
-    </div>
-  );
-}
-
-function Panel({ title, tone, line, note }: { title: string; tone: "ok" | "warn"; line: string; note: string }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4">
-      <h2 className="text-sm font-medium">{title}</h2>
-      <p className={`mt-1 text-xs ${tone === "ok" ? "text-emerald-300" : "text-amber-300"}`}>{line}</p>
-      <p className="mt-2 text-[11px] text-white/45">{note}</p>
-    </div>
-  );
-}
-
-function VaultSkeleton() {
-  return (
-    <div aria-hidden className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="h-[4.5rem] animate-pulse rounded-lg border border-white/10 bg-white/[0.02]" />
-      ))}
-    </div>
-  );
-}
-
 async function VaultLive() {
   await connection(); // live balance on every request, never a frozen prerender
   const [treasury, pimlico] = await Promise.all([getTreasuryStatus(), getPimlicoStatus()]);
   const shortfall =
     treasury.balanceLamports !== null ? Math.max(0, RENT_PER_LAUNCH_LAMPORTS - treasury.balanceLamports) : null;
 
-  const cards: { label: string; value: string; href?: string }[] = [
+  const cards: { label: string; value: string; href?: string; hint?: string }[] = [
     {
       label: "Treasury address",
       value: treasury.address ?? "not configured",
@@ -77,14 +41,28 @@ async function VaultLive() {
       value: treasury.launchesAffordable === null ? "—" : String(treasury.launchesAffordable),
     },
     { label: "Payer reserve (kept by the wallet)", value: `${PAYER_RESERVE_LAMPORTS.toLocaleString()} lamports` },
-    { label: "Shortfall for one launch", value: shortfall === null ? "—" : `${shortfall.toLocaleString()} lamports` },
+    {
+      label: "Shortfall for one launch",
+      value: shortfall === null ? "—" : `${shortfall.toLocaleString()} lamports`,
+      hint: shortfall === 0 ? "the balance covers one launch" : "top up to sponsor a launch",
+    },
   ];
 
   return (
     <>
+      {shortfall !== null && shortfall > 0 ? (
+        <div className="mt-6">
+          <Alert tone="warn" title="The treasury cannot cover a sponsored launch yet">
+            It is {shortfall.toLocaleString()} lamports short of the {RENT_PER_LAUNCH_LAMPORTS.toLocaleString()}{" "}
+            a create needs. Nothing is broken — sponsored mode simply stays unavailable until the wallet is
+            funded, and the user-signed path is unaffected.
+          </Alert>
+        </div>
+      ) : null}
+
       <dl className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((c) => (
-          <Card key={c.label} {...c} />
+          <Stat key={c.label} {...c} />
         ))}
       </dl>
 
@@ -119,15 +97,24 @@ async function VaultLive() {
   );
 }
 
+function VaultSkeleton() {
+  return (
+    <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <Skeleton key={i} className="h-[4.5rem]" />
+      ))}
+    </div>
+  );
+}
+
 export default function VaultPage() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
-      <h1 className="text-xl font-semibold tracking-tight">Vault</h1>
-      <p className="mt-2 text-sm text-white/60">
+      <PageHeader title="Vault">
         The wallet that sponsors launches. Its key is never in the repo: it is stored encrypted
         (AES-256-GCM + scrypt) in the environment, decrypted in memory for a single signature, and only
         the public address is ever displayed.
-      </p>
+      </PageHeader>
 
       <Suspense fallback={<VaultSkeleton />}>
         <VaultLive />

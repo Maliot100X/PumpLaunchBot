@@ -20,7 +20,6 @@ import {
   PublicKey,
   Transaction,
   type AccountMeta,
-  type VersionedTransaction,
 } from "@solana/web3.js";
 
 export const METADATA_LIMITS = { name: 32, symbol: 13, uri: 200 } as const;
@@ -49,7 +48,6 @@ export function validateLaunchInput(input: Partial<CreateLaunchInput>): Validati
       return;
     }
     try {
-      // eslint-disable-next-line no-new -- PublicKey throws on malformed input
       new PublicKey(value);
     } catch {
       issues.push({ field, message: "not a valid base58 Solana address" });

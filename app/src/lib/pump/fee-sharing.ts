@@ -48,7 +48,6 @@ export function validateShares(shares: ShareSpec[]): ShareIssue[] {
 
   shares.forEach((s, index) => {
     try {
-      // eslint-disable-next-line no-new -- PublicKey throws on malformed input
       new PublicKey(s.address);
     } catch {
       issues.push({ index, field: "address", message: `"${s.address}" is not a valid Solana address` });

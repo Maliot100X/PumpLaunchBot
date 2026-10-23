@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 
 /**
@@ -25,8 +25,13 @@ const TABS = [
 
 export function Nav() {
   const pathname = usePathname();
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  // Hydration flag without setState-in-effect (the lint rule react-hooks/set-state-in-effect rejects
+  // the useEffect version): false while server-rendering, true once the client is live.
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
 
   return (
     <header className="sticky top-0 z-40 border-b border-white/10 bg-[#08090a]/90 backdrop-blur">

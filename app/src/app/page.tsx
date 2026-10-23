@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Alert, Card, PageHeader } from "@/components/ui";
 
 const CARDS = [
   {
@@ -9,59 +10,58 @@ const CARDS = [
   {
     href: "/explore",
     title: "Explore",
-    body: "Look up any Solana token: price, liquidity, the real description and links, pulled from DexScreener and on-chain metadata.",
+    body: "Look up any Solana token: price, liquidity, the real description and links, from DexScreener and on-chain metadata.",
   },
   {
     href: "/launched",
     title: "Launched",
-    body: "Every coin this platform has created, with its curve progress, fee config and the wallets the fees flow to.",
+    body: "This platform's own launches, plus a live feed of what is launching on pump.fun right now.",
   },
   {
     href: "/agents",
     title: "Agents",
-    body: "The platform brain: launch, check the treasury, inspect fee logic. Same API the dashboard uses — no second implementation.",
+    body: "The platform brain: reads the vault, explains fee logic, looks tokens up, prepares launches. Same server code as the UI.",
   },
   {
     href: "/vault",
     title: "Vault",
-    body: "Treasury status for sponsored launches: balance, rent budget per coin, and the ledger of what was spent on what.",
+    body: "Treasury status for sponsored launches: balance, the real rent cost per coin, and how many launches it covers.",
   },
   {
     href: "/settings",
     title: "Settings",
-    body: "Fee split in basis points, default launch mode, metadata gateway and RPC. Everything that must be right before a real launch.",
+    body: "The live environment: fee split, pinning, RPC, sending gates. Answers what is actually configured before a launch.",
   },
 ] as const;
 
 export default function Home() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
-      <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-        Launch a pump.fun coin properly.
-      </h1>
-      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/60">
-        Optimise an existing token, grind a vanity mint if you want one, then launch — signed by
-        your own wallet, or sponsored by the platform treasury. Creator fees are split on chain
-        through pump.fun&apos;s own fee-sharing config, permanently, before the coin goes live.
-      </p>
+      <PageHeader title="Launch a pump.fun coin properly.">
+        Optimise an existing token, grind a vanity mint if you want one, then launch — signed by your own
+        wallet, or sponsored by the platform treasury. Creator fees are split on chain through pump.fun’s
+        own fee-sharing config, permanently, before the coin goes live.
+      </PageHeader>
 
-      <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {CARDS.map((card) => (
-          <Link
-            key={card.href}
-            href={card.href}
-            className="group rounded-lg border border-white/10 bg-white/[0.02] p-4 transition-colors hover:border-white/20 hover:bg-white/[0.04] focus-visible:border-[#5e6ad2] focus-visible:outline-none"
-          >
-            <div className="text-sm font-medium">{card.title}</div>
-            <p className="mt-1.5 text-xs leading-relaxed text-white/55">{card.body}</p>
-          </Link>
-        ))}
+      <div className="mt-6">
+        <Alert tone="warn" title="This deployment does not send transactions">
+          The launch path builds every transaction and simulates it against mainnet, then stops. A real
+          submit needs <code className="font-mono">NEXT_PUBLIC_ENABLE_SEND=true</code> (user-signed) or
+          <code className="font-mono"> TREASURY_LIVE=true</code> plus a funded treasury (sponsored).
+          Anything you see marked “prepared” has not been sent.
+        </Alert>
       </div>
 
-      <p className="mt-8 text-xs text-white/40">
-        Phases: 1 data layer · 2 metadata + wallet + shell · 3 launch flow · 4 fee sharing · 5 vanity
-        grinding · 6 tracking · 7 bot brain · 8 deploy.
-      </p>
+      <nav aria-label="Sections" className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {CARDS.map((card) => (
+          <Link key={card.href} href={card.href} className="group block rounded-lg">
+            <Card className="h-full p-4 transition-colors group-hover:border-white/20 group-hover:bg-white/[0.04] group-focus-visible:border-[#5e6ad2] group-active:bg-white/[0.06]">
+              <div className="text-sm font-medium">{card.title}</div>
+              <p className="mt-1.5 text-xs leading-relaxed text-white/55">{card.body}</p>
+            </Card>
+          </Link>
+        ))}
+      </nav>
     </div>
   );
 }

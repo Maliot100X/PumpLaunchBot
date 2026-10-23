@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { inputClass } from "@/components/ui";
 
 type Token = {
   mint: string;
@@ -67,19 +68,19 @@ export default function ExplorePage() {
           onChange={(e) => setMint(e.target.value)}
           placeholder="mint address, e.g. DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
           spellCheck={false}
-          className="min-w-0 flex-1 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-xs outline-none placeholder:text-white/30 focus:border-[#5e6ad2]"
+          className={`min-w-0 flex-1 font-mono text-xs ${inputClass}`}
         />
         <button
           type="submit"
           disabled={busy}
-          className="rounded-md bg-[#5e6ad2] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#4f59b8] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#828fff] disabled:opacity-50"
+          className="rounded-md bg-[#5e6ad2] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#4f59b8] active:bg-[#4650a8] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Looking up…" : "Look up"}
         </button>
       </form>
 
       {error ? (
-        <p className="mt-4 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+        <p role="alert" className="mt-4 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
           {error}
         </p>
       ) : null}

@@ -15,15 +15,29 @@ export type TokenLinks = {
   dexScreener: string;
   explorer: string;
   platformExplore: string;
+  /** The same view as an absolute URL — for sharing, bots and Telegram, where a path is useless. */
+  platformExploreAbsolute: string;
 };
 
+/**
+ * Absolute URL for a path in this app. Comes from NEXT_PUBLIC_APP_URL, which Vercel sets after the
+ * first deploy; without it the path is returned unchanged so local development keeps working.
+ */
+export function absoluteUrl(path: string): string {
+  const base = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/+$/, "");
+  if (!base) return path;
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 export function tokenLinks(mint: string): TokenLinks {
+  const platformExplore = `/explore?mint=${mint}`;
   return {
     mint,
     pumpFun: `https://pump.fun/coin/${mint}`,
     dexScreener: `https://dexscreener.com/solana/${mint}`,
     explorer: `https://solscan.io/token/${mint}`,
-    platformExplore: `/explore?mint=${mint}`,
+    platformExplore,
+    platformExploreAbsolute: absoluteUrl(platformExplore),
   };
 }
 
