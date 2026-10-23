@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "grind": "node scripts/grind.ts",
     "test": "node --test tests/*.test.ts"
   },
   "dependencies": {
