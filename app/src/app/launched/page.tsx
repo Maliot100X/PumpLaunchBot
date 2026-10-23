@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { connection } from "next/server";
 import { lifecycleFeed, type SolanaTrackerToken } from "@/lib/tokens/solanatracker";
 import { tokenLinks } from "@/lib/links";
@@ -12,16 +13,7 @@ import { tokenLinks } from "@/lib/links";
  * Live data on every request via `await connection()` — no frozen prerender (and `export const
  * dynamic` is not permitted with this build's cacheComponents setting).
  */
-export default async function LaunchedPage() {
-  await connection();
-  const feed = await lifecycleFeed();
-
-  const rows: { label: string; list: SolanaTrackerToken[] }[] = [
-    { label: "Newest", list: feed.latest.slice(0, 12) },
-    { label: "Graduating", list: feed.graduating.slice(0, 8) },
-    { label: "Graduated", list: feed.graduated.slice(0, 8) },
-  ];
-
+export default function LaunchedPage() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <h1 className="text-xl font-semibold tracking-tight">Launched tokens</h1>
@@ -38,8 +30,30 @@ export default async function LaunchedPage() {
         </p>
       </div>
 
-      <section className="mt-8">
-        <div className="flex items-baseline justify-between">
+      <Suspense fallback={<FeedSkeleton />}>
+        <LiveFeed />
+      </Suspense>
+    </div>
+  );
+}
+
+/**
+ * The live half. `connection()` inside a <Suspense> boundary is how this build (cacheComponents)
+ * streams: the page shell and the empty state paint immediately and the tracker data follows.
+ */
+async function LiveFeed() {
+  await connection();
+  const feed = await lifecycleFeed();
+
+  const rows: { label: string; list: SolanaTrackerToken[] }[] = [
+    { label: "Newest", list: feed.latest.slice(0, 12) },
+    { label: "Graduating", list: feed.graduating.slice(0, 8) },
+    { label: "Graduated", list: feed.graduated.slice(0, 8) },
+  ];
+
+  return (
+    <section className="mt-8">
+      <div className="flex items-baseline justify-between">
           <h2 className="text-sm font-medium">Live market feed</h2>
           <span className="font-mono text-[11px] text-white/35">
             solanatracker · {feed.latest.length + feed.graduating.length + feed.graduated.length} coins tracked
@@ -102,7 +116,17 @@ export default async function LaunchedPage() {
             )}
           </div>
         )}
-      </section>
+    </section>
+  );
+}
+
+function FeedSkeleton() {
+  return (
+    <div aria-hidden className="mt-8 space-y-3">
+      <div className="h-4 w-40 animate-pulse rounded bg-white/[0.07]" />
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} className="h-14 animate-pulse rounded-lg border border-white/10 bg-white/[0.02]" />
+      ))}
     </div>
   );
 }
