@@ -80,7 +80,7 @@ export function AgentChat() {
         </span>
       </div>
 
-      <div className="mt-3 max-h-[26rem] space-y-4 overflow-y-auto pr-1">
+      <div aria-live="polite" className="mt-3 max-h-[26rem] space-y-4 overflow-y-auto pr-1">
         {turns.length === 0 ? (
           <p className="text-xs text-white/45">
             The bot has the project knowledge and live tools. It can read the vault, explain fee logic,
@@ -130,7 +130,13 @@ export function AgentChat() {
           void send(message);
         }}
       >
+        <label htmlFor="agent-message" className="sr-only">
+          Message for the platform bot
+        </label>
         <input
+          id="agent-message"
+          name="message"
+          autoComplete="off"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           placeholder="ask the platform bot…"

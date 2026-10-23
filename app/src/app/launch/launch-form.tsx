@@ -210,27 +210,27 @@ export function LaunchForm() {
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-name">Name (max 32 bytes)</label>
-            <input id="f-name" className={input} value={name} onChange={(e) => setName(e.target.value)} />
+            <input id="f-name" name="name" autoComplete="off" className={input} value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div>
             <label className={label} htmlFor="f-symbol">Ticker (max 13)</label>
-            <input id="f-symbol" className={input} value={symbol} onChange={(e) => setSymbol(e.target.value)} />
+            <input id="f-symbol" name="symbol" autoComplete="off" className={input} value={symbol} onChange={(e) => setSymbol(e.target.value)} />
           </div>
           <div>
             <label className={label} htmlFor="f-twitter">X / Twitter (optional)</label>
-            <input id="f-twitter" className={input} value={twitter} onChange={(e) => setTwitter(e.target.value)} />
+            <input id="f-twitter" name="twitter" autoComplete="off" inputMode="url" className={input} value={twitter} onChange={(e) => setTwitter(e.target.value)} />
           </div>
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-image">Image URL</label>
-            <input id="f-image" className={input} value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…" />
+            <input id="f-image" name="imageUrl" autoComplete="off" inputMode="url" className={input} value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…" />
           </div>
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-desc">Description</label>
-            <textarea id="f-desc" rows={3} className={input} value={description} onChange={(e) => setDescription(e.target.value)} />
+            <textarea id="f-desc" name="description" autoComplete="off" rows={3} className={input} value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-site">Website (optional)</label>
-            <input id="f-site" className={input} value={website} onChange={(e) => setWebsite(e.target.value)} />
+            <input id="f-site" name="website" autoComplete="off" inputMode="url" className={input} value={website} onChange={(e) => setWebsite(e.target.value)} />
           </div>
           <div className="sm:col-span-2 rounded-md border border-white/10 bg-white/[0.015] p-3">
             <p className="text-xs font-medium text-white/70">Vanity mint (optional)</p>
@@ -242,12 +242,12 @@ export function LaunchForm() {
             <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
               <div>
                 <label className={label} htmlFor="f-prefix">Starts with</label>
-                <input id="f-prefix" className={`${input} font-mono text-xs`} value={prefix} maxLength={6}
+                <input id="f-prefix" name="prefix" autoComplete="off" spellCheck={false} className={`${input} font-mono text-xs`} value={prefix} maxLength={6}
                        onChange={(e) => setPrefix(e.target.value)} placeholder="e.g. pump" />
               </div>
               <div>
                 <label className={label} htmlFor="f-suffix">Ends with</label>
-                <input id="f-suffix" className={`${input} font-mono text-xs`} value={suffix} maxLength={6}
+                <input id="f-suffix" name="suffix" autoComplete="off" spellCheck={false} className={`${input} font-mono text-xs`} value={suffix} maxLength={6}
                        onChange={(e) => setSuffix(e.target.value)} placeholder="e.g. 999" />
               </div>
               <label className="flex items-center gap-2 pb-2 text-[11px] text-white/55">
@@ -263,7 +263,7 @@ export function LaunchForm() {
               </button>
             </div>
             {grind ? (
-              <p className="mt-2 font-mono text-[11px] text-white/50">
+              <p aria-live="polite" className="mt-2 font-mono text-[11px] text-white/50 tabular">
                 {grind.attempts.toLocaleString()} attempts · {grind.rate.toLocaleString()}/s ·{" "}
                 {grind.expected ? `budget ~${grind.expected.toLocaleString()}` : ""}
               </p>
@@ -273,7 +273,7 @@ export function LaunchForm() {
           <div className="sm:col-span-2">
             <label className={label} htmlFor="f-mint">Mint address</label>
             <div className="flex gap-2">
-              <input id="f-mint" className={`${input} font-mono text-xs`} value={mint} onChange={(e) => setMint(e.target.value)} />
+              <input id="f-mint" name="mint" autoComplete="off" spellCheck={false} className={`${input} font-mono text-xs tabular`} value={mint} onChange={(e) => setMint(e.target.value)} />
               <button type="button" onClick={generateMint} className="shrink-0 rounded-md border border-white/15 px-3 text-xs hover:bg-white/5">
                 random
               </button>

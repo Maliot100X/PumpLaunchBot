@@ -40,4 +40,41 @@
     outline: 2px solid #828fff;
     outline-offset: 2px;
   }
+
+  /* Headings: balance the line breaks instead of leaving a widow (Web Interface Guidelines). */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  /* Removes the 300ms double-tap-zoom wait on touch devices. */
+  a,
+  button,
+  input,
+  label,
+  summary {
+    touch-action: manipulation;
+  }
+}
+
+/*
+ * Web Interface Guidelines compliance, checked rather than assumed:
+ *  - motion is opt-outable: the skeleton pulses and every transition collapse for users who ask
+ *    for reduced motion (Tailwind's animate-* utilities do not do this on their own)
+ *  - numbers compare cleanly in columns: .tabular applies font-variant-numeric
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
 }
