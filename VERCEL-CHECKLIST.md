@@ -72,3 +72,24 @@ step that cannot be verified from here.
 3. Open `/vault`: it reads the treasury over RPC, so a wrong RPC key shows up there immediately.
 4. Only then set `TREASURY_LIVE=true` (with a funded treasury) and `NEXT_PUBLIC_ENABLE_SEND=true`,
    and run the real launch test.
+
+## Verifying a build locally — restart the server first
+
+`npm run build` rewrites `.next` while a `next start` server is still running. That server keeps its
+old route manifest and keeps serving old chunk filenames, so a route added in the new build answers
+**404** and pages can hydrate broken — with no error anywhere. Measured on this project three times
+in one session, once as a real 404 on a brand-new `/token` route that was definitely in the build
+output (the build listed `◐ /token` while the running server returned 404 for it).
+
+The order that works:
+
+```bash
+npm run build
+pkill -f "next-server"          # or kill the pid on the port
+PORT=3301 npm start &           # fresh process, fresh manifest
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3301/<new-route>
+```
+
+And verify in a real browser, not curl: pages that read `useSearchParams` inside `<Suspense>` render
+their interactive half only after hydration, so their text is absent from the server HTML even when
+the page is correct.
