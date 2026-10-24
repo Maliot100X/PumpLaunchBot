@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { PageHeader, Skeleton } from "@/components/ui";
 import { ShieldClient } from "./shield-client";
+import { VampShield } from "./vamp-shield";
 
 /**
  * Shield tab — a client page that keeps the ?mint= deep link working.
@@ -18,7 +19,13 @@ import { ShieldClient } from "./shield-client";
 function ShieldWithParam() {
   const searchParams = useSearchParams();
   const initialMint = (searchParams.get("mint") ?? "").trim();
-  return <ShieldClient initialMint={initialMint} />;
+  return (
+    <>
+      {/* The anti-vamp half: how cheap a copy is, a suspect checker, and the radar. */}
+      <VampShield initialMint={initialMint} />
+      <ShieldClient initialMint={initialMint} />
+    </>
+  );
 }
 
 export default function ShieldPage() {
