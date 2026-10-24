@@ -77,6 +77,26 @@ function bundleBuys(count: number, vsolStart: number, eachGross: number): Buy {
   return { tokens, net, vsolAfter: vsol };
 }
 
+/**
+ * The reference input is an ORDERED LIST — "Extra wallets (SOL each, in order)" — not a count, and
+ * order matters: the same SOL bought later in the curve buys fewer tokens, because every earlier buy
+ * has already pushed the price up. So this walks the list in sequence rather than multiplying one
+ * average.
+ */
+function bundleBuysInOrder(amounts: number[], vsolStart: number): Buy {
+  let vsol = vsolStart;
+  let tokens = 0;
+  let net = 0;
+  for (const gross of amounts) {
+    if (!(gross > 0)) continue;
+    const b = buy(gross, vsol);
+    vsol = b.vsolAfter;
+    tokens += b.tokens;
+    net += b.net;
+  }
+  return { tokens, net, vsolAfter: vsol };
+}
+
 /* ----------------------------------------------------------------- formatters */
 
 function compact(n: number, digits = 2): string {
@@ -106,20 +126,34 @@ const LADDER = [0, 1, 2, 3, 4, 6, 8, 10, 15, 20];
 
 export function LabClient() {
   const [devBuyRaw, setDevBuyRaw] = useState("1");
-  const [bundlesRaw, setBundlesRaw] = useState("0");
+  /** Ordered SOL-per-wallet list: the reference's "Extra wallets (SOL each, in order)". */
+  const [walletRaw, setWalletRaw] = useState<string[]>([]);
   const [devPctRaw, setDevPctRaw] = useState("5");
   const [targetMcRaw, setTargetMcRaw] = useState("28");
   const [solUsdRaw, setSolUsdRaw] = useState("");
 
   const devBuySol = Math.min(1_000_000, Math.max(0, numberOr(devBuyRaw, 1)));
-  const bundles = Math.min(200, Math.max(0, Math.floor(numberOr(bundlesRaw, 0))));
+  const walletAmounts = useMemo(
+    () =>
+      walletRaw
+        .map((r) => Math.min(1_000_000, Math.max(0, numberOr(r, 0))))
+        .filter((n) => n > 0)
+        .slice(0, 200),
+    [walletRaw],
+  );
+  /** The concentration ladder below still works in counts, so it uses how many wallets were named. */
+  const bundles = walletAmounts.length;
+  /** A representative single buy, for the ladder's "as the bundle grows" comparison. */
+  const bundleEachSol = walletAmounts.length
+    ? walletAmounts.reduce((a, b) => a + b, 0) / walletAmounts.length
+    : Math.max(0, devBuySol);
   const declaredDevShare = Math.min(100, Math.max(0, numberOr(devPctRaw, 5))) / 100;
   const targetMcSol = Math.max(0, numberOr(targetMcRaw, 28));
   const solUsd = Math.max(0, numberOr(solUsdRaw, 0));
 
   const m = useMemo(() => {
     const dev = buy(devBuySol, VIRTUAL_SOL);
-    const bundle = bundleBuys(bundles, dev.vsolAfter, devBuySol);
+    const bundle = bundleBuysInOrder(walletAmounts, dev.vsolAfter);
 
     const devShare = dev.tokens / TOTAL_SUPPLY;
     const bundleShare = bundle.tokens / TOTAL_SUPPLY;
@@ -161,12 +195,14 @@ export function LabClient() {
       concentrated: teamShare * 100 >= CONCENTRATION_PCT,
       declaredExtra: declaredDevShare - devShare,
     };
-  }, [devBuySol, bundles, declaredDevShare, targetMcSol]);
+  }, [devBuySol, walletAmounts, declaredDevShare, targetMcSol]);
 
   const ladderRows = useMemo(() => {
     const counts = Array.from(new Set([...LADDER, bundles])).sort((a, b) => a - b);
     return counts.map((count) => {
-      const b = bundleBuys(count, m.dev.vsolAfter, devBuySol);
+      // The ladder asks "what if the bundle had N wallets of this size?" — so it uses the average
+      // size of the wallets actually named above, not the dev buy, which may be a different number.
+      const b = bundleBuys(count, m.dev.vsolAfter, bundleEachSol);
       const bundleShare = b.tokens / TOTAL_SUPPLY;
       return {
         count,
@@ -176,7 +212,7 @@ export function LabClient() {
         float: Math.max(0, 1 - m.devShare - bundleShare),
       };
     });
-  }, [bundles, devBuySol, m.dev.vsolAfter, m.devShare]);
+  }, [bundles, bundleEachSol, m.dev.vsolAfter, m.devShare]);
 
   const presets = [
     { label: "Stealth · 0.5", devBuy: "0.5", bundle: "0" },
@@ -185,7 +221,9 @@ export function LabClient() {
     { label: "Whale snipe · 5", devBuy: "5", bundle: "0" },
     { label: "Graduate it · 85", devBuy: "85", bundle: "0" },
   ];
-  const activePreset = presets.find((p) => p.devBuy === devBuyRaw && p.bundle === bundlesRaw)?.label;
+  const activePreset = presets.find(
+    (p) => p.devBuy === devBuyRaw && Number(p.bundle) === walletRaw.length,
+  )?.label;
 
   return (
     <div className="mt-6 space-y-3">
@@ -218,23 +256,61 @@ export function LabClient() {
             />
           </Field>
 
-          <Field
-            id="lab-bundles"
-            label="Bundled wallets"
-            hint={`Wallets you fund, modelled at the same size as the dev buy (${devBuySol} SOL each) buying right after you.`}
-          >
-            <input
-              id="lab-bundles"
-              name="bundles"
-              className={`${inputClass} tabular`}
-              type="number"
-              inputMode="numeric"
-              min={0}
-              step={1}
-              value={bundlesRaw}
-              onChange={(e) => setBundlesRaw(e.target.value)}
-            />
-          </Field>
+          <div>
+            <p className="text-xs text-white/60">Extra wallets (SOL each, in order)</p>
+            <p className="mt-0.5 text-[11px] text-white/35">
+              Order matters: the same SOL bought later in the curve buys fewer tokens, because every
+              earlier buy has already pushed the price up.
+            </p>
+
+            <div className="mt-2 space-y-2">
+              {walletRaw.length === 0 ? (
+                <p className="text-[11px] text-white/35">No extra wallets. Add one to model a bundle.</p>
+              ) : null}
+              {walletRaw.map((value, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <label htmlFor={`lab-wallet-${i}`} className="w-20 shrink-0 text-[11px] text-white/40">
+                    #{i + 1}
+                  </label>
+                  <input
+                    id={`lab-wallet-${i}`}
+                    name={`wallet-${i}`}
+                    className={`${inputClass} tabular`}
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step={0.1}
+                    value={value}
+                    onChange={(e) =>
+                      setWalletRaw((rows) => rows.map((r, j) => (j === i ? e.target.value : r)))
+                    }
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    aria-label={`Remove wallet ${i + 1}`}
+                    onClick={() => setWalletRaw((rows) => rows.filter((_, j) => j !== i))}
+                  >
+                    remove
+                  </Button>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  setWalletRaw((rows) => (rows.length >= 200 ? rows : [...rows, String(devBuySol)]))
+                }
+              >
+                + Add wallet
+              </Button>
+            </div>
+          </div>
 
           <Field
             id="lab-dev-pct"
@@ -303,7 +379,9 @@ export function LabClient() {
               aria-pressed={activePreset === p.label}
               onClick={() => {
                 setDevBuyRaw(p.devBuy);
-                setBundlesRaw(p.bundle);
+                // The presets are counts of equal wallets; the input is an ordered list, so a
+                // "bundled team" of 4 becomes four wallets each buying the preset's amount.
+                setWalletRaw(Array.from({ length: Number(p.bundle) || 0 }, () => String(p.devBuy)));
               }}
             >
               {p.label}
@@ -311,6 +389,35 @@ export function LabClient() {
           ))}
         </div>
       </Card>
+
+      {/* The four numbers the scraped reference puts above everything else, in its own labels:
+          DEV OWNS / MARKET CAP / SOL IN CURVE / ENTRY PRICE. Same model as the detail below —
+          this is a headline row, not a second calculation. */}
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {(
+          [
+            ["Dev owns", asPct(m.devShare)],
+            ["Market cap", solUsd > 0 ? usd(m.mcAfterDevBuy * solUsd) : sol(m.mcAfterDevBuy, 1)],
+            ["SOL in curve", m.netInCurve.toFixed(2)],
+            ["Entry price", nanosol(m.entryPrice)],
+          ] as [string, string][]
+        ).map(([k, v]) => (
+          <div key={k} className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+            <p className="text-[11px] uppercase tracking-wide text-white/40">{k}</p>
+            <p className="tabular mt-1 text-lg">{v}</p>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] leading-relaxed text-white/40">
+        {((m.dev.tokens / CURVE_SUPPLY) * 100).toFixed(1)}% to graduation: the curve has sold{" "}
+        {(m.dev.tokens / 1e6).toFixed(2)}M of its {CURVE_SUPPLY / 1e6}M tokens, and {GRADUATION_SOL} SOL raised is
+        the threshold. Start MC: {sol(VIRTUAL_SOL, 0)}.{" "}
+        {m.progress >= 0.85
+          ? "Dev share is close to the whole float — this would graduate on your own buy alone."
+          : `Dev share ${asPct(m.devShare)} — a believable, small allocation.`}{" "}
+        Estimates only. Fees: 1% of each buy. Real launches may differ — check pump.fun&apos;s current
+        parameters.
+      </p>
 
       {/* ---------------------------------------------------- computed numbers */}
       <section aria-labelledby="lab-numbers">
@@ -434,9 +541,10 @@ export function LabClient() {
           Bundled wallets
         </SectionTitle>
         <p className="mt-2 text-xs leading-relaxed text-white/40">
-          Assumption: each bundled wallet buys the same amount as your dev buy ({devBuySol} SOL),
-          after you, in order — so each one gets fewer tokens than the one before it. Effective float
-          is the supply neither you nor the bundle holds, i.e. what strangers actually get to buy.
+          Assumption: the ladder models wallets buying the same size as each other, using the average
+          of the sizes you named above ({bundleEachSol.toFixed(2)} SOL). Buys happen after yours, in
+          order — so each one gets fewer tokens than the one before it. Effective float is the supply
+          neither you nor the bundle holds, i.e. what strangers actually get to buy.
         </p>
 
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
