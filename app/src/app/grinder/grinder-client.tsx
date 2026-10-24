@@ -11,6 +11,8 @@ import {
   validatePattern,
   type GrindResult,
 } from "@/lib/vanity/grind";
+import { ExpectationsTable } from "./expectations-table";
+import { baselineRate, humanTime, rateLabel, verdictFor } from "./expectations";
 
 /**
  * Grinder — the browser vanity-address search, wired to the real engine in src/lib/vanity/grind.ts.
@@ -22,30 +24,13 @@ import {
  *  - keys are generated in this tab, matched here, and never uploaded. The secret key is shown once
  *    and is never stored anywhere.
  *  - the speed shown is measured on this device (attempts ÷ elapsed), and the time estimate uses that
- *    measured rate — not a marketing number.
+ *    measured rate — not a marketing number. Before the first run there is no measurement yet, so the
+ *    estimate falls back to the engine's own documented baseline rate and says so in the label.
+ *
+ * The pre-run verdicts and the expectations table both come from ./expectations, which computes them
+ * with expectedAttempts() — the same function this component's progress budget uses, so the table and
+ * a real run cannot disagree.
  */
-
-const DIFFICULTY = [
-  { max: 1e5, label: "Instant" },
-  { max: 1e7, label: "Easy" },
-  { max: 1e10, label: "Medium" },
-  { max: Infinity, label: "GPU only" },
-] as const;
-
-function difficultyOf(expected: number): string {
-  return DIFFICULTY.find((d) => expected <= d.max)?.label ?? "GPU only";
-}
-
-function humanTime(expected: number, perSecond: number): string {
-  if (perSecond <= 0) return "measuring…";
-  const s = expected / perSecond;
-  if (s < 1) return "under a second";
-  if (s < 60) return `${s.toFixed(1)} s`;
-  if (s < 3600) return `${(s / 60).toFixed(1)} min`;
-  if (s < 86_400) return `${(s / 3600).toFixed(1)} h`;
-  if (s < 31_536_000) return `${(s / 86_400).toFixed(1)} d`;
-  return `${(s / 31_536_000).toFixed(1)} y`;
-}
 
 type Found = {
   address: string;
@@ -77,6 +62,11 @@ export function GrinderClient() {
   }, [start, end, ignoreCase]);
 
   const patternOk = expected !== null;
+
+  // The rate the estimate divides by: this device's own measurement once a run has produced one,
+  // otherwise the engine's documented baseline (labelled in the UI so nobody mistakes it for a
+  // measurement of their machine).
+  const { rate: rateUsed, measured: rateIsMeasured } = baselineRate(measuredRate);
 
   const run = useCallback(async () => {
     setError(null);
@@ -233,14 +223,16 @@ export function GrinderClient() {
           hint="the estimated number of keypairs for this pattern"
         />
         <Stat
-          label="Difficulty"
-          value={expected === null ? "—" : difficultyOf(expected)}
+          label="Verdict"
+          value={expected === null ? "—" : verdictFor(expected)}
           hint="Instant ≤ 100K · Easy ≤ 10M · Medium ≤ 10B · above that is GPU territory"
         />
         <Stat
           label="Time on this device"
-          value={expected === null ? "—" : humanTime(expected, measuredRate)}
-          hint={measuredRate > 0 ? `measured ${measuredRate.toLocaleString()} keys/s here` : "run a grind to measure the rate"}
+          value={expected === null ? "—" : humanTime(expected, rateUsed)}
+          hint={`${rateLabel(rateUsed, rateIsMeasured)}${
+            rateIsMeasured ? "" : " — start a grind and it switches to this device's own rate"
+          }`}
         />
       </div>
 
@@ -281,6 +273,8 @@ export function GrinderClient() {
           </ul>
         </Card>
       ) : null}
+
+      <ExpectationsTable rate={rateUsed} measured={rateIsMeasured} />
     </div>
   );
 }

@@ -1,24 +1,48 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Alert, Button, Card, Field, LinkButton, SectionTitle, inputClass } from "@/components/ui";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { PublicKey } from "@solana/web3.js";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Field,
+  LinkButton,
+  SectionTitle,
+  inputClass,
+} from "@/components/ui";
 import { METADATA_LIMITS, validateLaunchInput } from "@/lib/pump/create";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { tokenLinks } from "@/lib/links";
+import { CopyButton } from "./copy";
 
 /**
- * Launch Kit — fill the coin in once and get the exact object that gets pinned, plus a checklist
- * wired to the tab that does each remaining step.
+ * Launch Kit — fill the coin in once and this tab emits three things from the same fields:
+ * the metadata file (the pump.fun shape src/lib/pinata.ts pins), a template launch thread, and a
+ * nine-item checklist wired to the tab that does each remaining step.
  *
- * Two rules this tab keeps:
- *  - the byte counters are the program's own limits, imported from the launch code
- *    (`METADATA_LIMITS` / `validateLaunchInput`) rather than typed in again here, so this tab can
- *    never drift from what the create instruction will actually accept;
- *  - the JSON below is the metadata object and nothing else — no invented fields, no `any`.
+ * The rule this tab is built around — every tick has to come from state this page can actually
+ * read, and where there is none it says so:
+ *   - nothing in this app writes localStorage, sessionStorage or a cookie (measured: no such call
+ *     exists in src/), so most of the checklist is genuinely invisible from here. Those items carry
+ *     "not tracked here" and a link — never a checkbox that ticks itself into a lie.
+ *   - two items DO have real state: item 8/9 tick from the platform's own launch registry
+ *     (GET /api/registry), which is written only after a launch confirms, and item 7 ticks from
+ *     fetching the pinned metadata URI back through the browser and comparing it with this coin.
+ *   - the byte counters are the program's own limits, imported from the launch code
+ *     (METADATA_LIMITS / validateLaunchInput), so this tab cannot drift from what create_v2 accepts.
  */
+
+/* ---------------------------------------------------------------------------- helpers */
 
 /** The program counts bytes, not JS characters — a name with an emoji in it is longer than it looks. */
 function byteLen(value: string): number {
   return new TextEncoder().encode(value).length;
+}
+
+/** X counts code points, so an emoji is one character there and two UTF-16 units in JS. */
+function charCount(value: string): number {
+  return Array.from(value).length;
 }
 
 /** The pin route requires a fetchable URL; `new URL` in a try/catch is the same check it makes. */
@@ -31,7 +55,57 @@ function looksLikeUrl(value: string): boolean {
   }
 }
 
-/** Exactly the object the pin route writes to IPFS (field for field, optionals only when filled). */
+/** Same validation the launch path applies to a mint: a base58 public key that round-trips. */
+function addressIssue(value: string): string | null {
+  const v = value.trim();
+  if (v === "") return null;
+  try {
+    if (new PublicKey(v).toBase58() !== v) return "not a valid base58 Solana address";
+    return null;
+  } catch {
+    return "not a valid base58 Solana address";
+  }
+}
+
+function isAddress(value: string): boolean {
+  return value.trim() !== "" && addressIssue(value) === null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** ipfs://<cid>, a bare CID and an http(s) URL all become something fetchable. */
+function pinReadUrl(value: string): string | null {
+  const v = value.trim();
+  if (v === "") return null;
+  if (v.startsWith("ipfs://")) {
+    const path = v.slice("ipfs://".length).replace(/^ipfs\//, "");
+    return path ? `https://gateway.pinata.cloud/ipfs/${path}` : null;
+  }
+  // A bare CID: v0 (base58, Qm…) or v1 (base32, b…).
+  if (/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{20,})$/.test(v)) {
+    return `https://gateway.pinata.cloud/ipfs/${v}`;
+  }
+  try {
+    const parsed = new URL(v);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------------------- shapes */
+
+/** Exactly the object the pin route writes to IPFS, field for field (see src/lib/pinata.ts). */
 type TokenMetadata = {
   name: string;
   symbol: string;
@@ -42,80 +116,162 @@ type TokenMetadata = {
   website?: string;
 };
 
+type RegistryRecord = {
+  mint: string;
+  name: string;
+  symbol: string;
+  mode: string;
+  metadataUri: string;
+  signatures: string[];
+  createdAt: number;
+};
+
+type RegistryState =
+  | { phase: "idle" }
+  | { phase: "checking" }
+  | { phase: "unconfigured"; detail: string }
+  | { phase: "error"; detail: string }
+  | { phase: "ok"; total: number; count: number; match: RegistryRecord | null };
+
+type PinCheck =
+  | { phase: "idle" }
+  | { phase: "checking"; readUrl: string }
+  | { phase: "unreadable"; readUrl: string; detail: string }
+  | { phase: "not-json"; readUrl: string; status: number; detail: string }
+  | {
+      phase: "read";
+      readUrl: string;
+      status: number;
+      bytes: number;
+      keys: string[];
+      name: string | null;
+      symbol: string | null;
+      showName: boolean;
+    };
+
+type ItemState = "done" | "open" | "idle" | "untracked";
+
+type CheckItem = {
+  key: string;
+  n: number;
+  label: string;
+  /** Where this step actually happens. `null` for the one item this page checks itself. */
+  href: string | null;
+  openLabel: string;
+  state: ItemState;
+  stateLabel: string;
+  note: string;
+};
+
+function parseLaunchRecord(value: unknown): RegistryRecord | null {
+  if (!isRecord(value)) return null;
+  const mint = asString(value.mint);
+  if (!mint) return null;
+  return {
+    mint,
+    name: asString(value.name) ?? "",
+    symbol: asString(value.symbol) ?? "",
+    mode: asString(value.mode) ?? "",
+    metadataUri: asString(value.metadataUri) ?? "",
+    signatures: Array.isArray(value.signatures)
+      ? value.signatures.filter((s): s is string => typeof s === "string")
+      : [],
+    createdAt: asNumber(value.createdAt) ?? 0,
+  };
+}
+
+/** A state chip. "not tracked here" is deliberately not a tick and not an amber warning. */
+function StateChip({ state, label }: { state: ItemState; label: string }) {
+  if (state === "done") return <Badge tone="ok">{label}</Badge>;
+  if (state === "open") return <Badge tone="warn">{label}</Badge>;
+  return <span className="font-mono text-[11px] text-white/35">{label}</span>;
+}
+
+/** A URL field with the pin route's own validation (http(s) or ipfs, fetchable). */
 function UrlField({
   id,
   label,
   hint,
   value,
   onChange,
+  className = "",
 }: {
   id: string;
   label: string;
   hint: string;
   value: string;
   onChange: (next: string) => void;
+  className?: string;
 }) {
   const bad = value.trim() !== "" && !looksLikeUrl(value);
   return (
-    <Field id={id} label={label} hint={hint} error={bad ? "must be an http(s) or ipfs URL" : null}>
-      <input
-        id={id}
-        name={id.replace("kit-", "")}
-        className={inputClass}
-        autoComplete="off"
-        spellCheck={false}
-        inputMode="url"
-        aria-invalid={bad}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </Field>
+    <div className={className}>
+      <Field id={id} label={label} hint={hint} error={bad ? "must be an http(s) or ipfs URL" : null}>
+        <input
+          id={id}
+          name={id.replace("kit-", "")}
+          className={inputClass}
+          autoComplete="off"
+          spellCheck={false}
+          inputMode="url"
+          aria-invalid={bad}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </Field>
+    </div>
   );
 }
 
-export function KitClient() {
-  const { connected } = useWallet();
+/* ---------------------------------------------------------------------------- component */
 
+export function KitClient() {
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [description, setDescription] = useState("");
   const [image, setImage] = useState("");
+  const [website, setWebsite] = useState("");
   const [twitter, setTwitter] = useState("");
   const [telegram, setTelegram] = useState("");
-  const [website, setWebsite] = useState("");
-  const [uri, setUri] = useState("");
-  const [copied, setCopied] = useState<"idle" | "ok" | "failed">("idle");
+  const [ca, setCa] = useState("");
+  const [devBuy, setDevBuy] = useState("");
 
-  // Two checklist items cannot be derived here — whether a vanity mint exists and whether the fee
-  // split is settled both happen in other tabs — so they are local, user-ticked state.
-  const [mintGround, setMintGround] = useState(false);
-  const [splitDecided, setSplitDecided] = useState(false);
+  const [pinUri, setPinUri] = useState("");
+  const [pin, setPin] = useState<PinCheck>({ phase: "idle" });
+  const [registry, setRegistry] = useState<RegistryState>({ phase: "idle" });
+  const [downloadNote, setDownloadNote] = useState<string | null>(null);
 
-  /**
-   * The real validator from the launch path, run over the fields this tab owns. Issues for
-   * mint/creator/user are dropped (those are the launch tab's to supply), and "required" is dropped
-   * so an untouched form is not dressed up as broken — an empty field simply has no message yet.
-   */
-  const issues = useMemo(() => validateLaunchInput({ name, symbol, uri }), [name, symbol, uri]);
-  const issueFor = (field: "name" | "symbol" | "uri"): string | null =>
+  const sendEnabled = process.env.NEXT_PUBLIC_ENABLE_SEND === "true";
+
+  /* --- validation: the launch path's own validator over the fields this tab owns --- */
+
+  const issues = useMemo(() => validateLaunchInput({ name, symbol }), [name, symbol]);
+  const issueFor = (field: "name" | "symbol"): string | null =>
     issues.find((i) => i.field === field && i.message !== "required")?.message ?? null;
 
-  const nameIssue = issueFor("name");
-  const symbolIssue = issueFor("symbol");
-  const uriIssue = issueFor("uri");
-
-  /**
-   * The validator names the limit; the task is to name the overage too — "3 over" is the number that
-   * tells someone how much to cut, and it is the one the message does not carry on its own.
-   */
+  /** Name the overage too: "3 over" is the number that tells someone how much to cut. */
   const withOverage = (issue: string | null, value: string, limit: number): string | null => {
     if (issue === null) return null;
     const over = byteLen(value) - limit;
     return over > 0 ? `${issue} — ${over} over` : issue;
   };
+
+  const nameIssue = issueFor("name");
+  const symbolIssue = issueFor("symbol");
   const nameError = withOverage(nameIssue, name, METADATA_LIMITS.name);
   const symbolError = withOverage(symbolIssue, symbol, METADATA_LIMITS.symbol);
-  const uriError = withOverage(uriIssue, uri, METADATA_LIMITS.uri);
+
+  const caError = addressIssue(ca);
+  const caOk = isAddress(ca);
+  const trimmedCa = ca.trim();
+
+  const devBuyError = useMemo(() => {
+    const v = devBuy.trim();
+    if (v === "") return null;
+    return Number.isFinite(Number(v)) && Number(v) >= 0 ? null : "must be a number of SOL (0 or more)";
+  }, [devBuy]);
+
+  /* ------------------------------------------------------------------ metadata file */
 
   const metadata = useMemo<TokenMetadata>(
     () => ({
@@ -131,116 +287,373 @@ export function KitClient() {
   );
 
   const json = useMemo(() => JSON.stringify(metadata, null, 2), [metadata]);
-
-  const imageValid = image.trim() !== "" && looksLikeUrl(image);
-  const metadataValid =
-    name.trim() !== "" &&
-    symbol.trim() !== "" &&
-    nameIssue === null &&
-    symbolIssue === null &&
-    imageValid &&
-    (twitter.trim() === "" || looksLikeUrl(twitter)) &&
-    (telegram.trim() === "" || looksLikeUrl(telegram)) &&
-    (website.trim() === "" || looksLikeUrl(website)) &&
-    (uri.trim() === "" || uriIssue === null);
-
-  // The export is only blocked by the program's own limits plus the two fields the pin route
-  // requires — everything else can be filled in after the file is written.
-  const exportable = name.trim() !== "" && symbol.trim() !== "" && nameIssue === null && symbolIssue === null;
-  const exportBlocked = !exportable;
-
-  const sendEnabled = process.env.NEXT_PUBLIC_ENABLE_SEND === "true";
-
-  async function copyJson() {
-    try {
-      await navigator.clipboard.writeText(json);
-      setCopied("ok");
-    } catch {
-      // Say it failed rather than pretending: clipboard access needs a secure context and permission.
-      setCopied("failed");
-    }
-    window.setTimeout(() => setCopied("idle"), 2500);
-  }
+  // The file is useless without the two fields create_v2 measures; the rest can be filled in later.
+  const metadataReady = name.trim() !== "" && symbol.trim() !== "" && nameIssue === null && symbolIssue === null;
+  const slug = symbol.trim().toLowerCase().replace(/[^a-z0-9]+/g, "") || "token";
+  const filename = `${slug}-metadata.json`;
 
   function downloadJson() {
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const slug = symbol.trim().toLowerCase().replace(/[^a-z0-9]+/g, "") || "token";
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${slug}-metadata.json`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     // Revoking immediately can cancel the download in some browsers; give it a beat.
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // A click cannot report what the browser did with the file — so the note says what was asked.
+    setDownloadNote(`the browser was asked to save ${filename}`);
   }
 
-  const checklist: {
-    key: string;
-    label: string;
-    done: boolean;
-    href: string;
-    note: string;
-    manual?: boolean;
-  }[] = [
+  /* ------------------------------------------------------------------- launch thread */
+
+  const thread = useMemo(() => {
+    const nm = name.trim();
+    const sym = symbol.trim();
+    const desc = description.trim();
+    const buy = devBuy.trim();
+    const posts: { key: string; label: string; body: string }[] = [];
+    const skipped: string[] = [];
+
+    if (nm !== "" && sym !== "") {
+      posts.push({
+        key: "hook",
+        label: "1 · the hook",
+        body: [desc !== "" ? `${nm} ($${sym})\n\n${desc}` : `${nm} ($${sym})`, "launching on pump.fun"].join(
+          "\n\n",
+        ),
+      });
+      if (desc === "") {
+        skipped.push(
+          "the pitch line in the hook — there is no description in the Kit yet, so the post is the name, the ticker and the pump.fun line.",
+        );
+      }
+    } else {
+      skipped.push("the hook — it needs a name and a ticker from the fields above.");
+    }
+
+    if (trimmedCa !== "" && caOk) {
+      posts.push({
+        key: "ca",
+        label: "2 · the contract address",
+        body: [`$${sym || "…"} launched`, `CA: ${trimmedCa}`, ...(buy !== "" ? [`dev buy: ${buy} SOL`] : [])].join(
+          "\n",
+        ),
+      });
+      posts.push({
+        key: "verify",
+        label: "3 · the verification line",
+        body: [
+          `The only official CA is ${trimmedCa} — it ends in "${trimmedCa.slice(-4)}". Anything else with the ticker $${sym || "…"} is a copy.`,
+          tokenLinks(trimmedCa).pumpFun,
+        ].join("\n\n"),
+      });
+    } else {
+      skipped.push(
+        "the CA post and the verification line — there is no valid contract address yet, so no address and no coin link are written (no placeholder stands in for one).",
+      );
+    }
+
+    const socials = [
+      website.trim() !== "" ? `site · ${website.trim()}` : null,
+      twitter.trim() !== "" ? `x · ${twitter.trim()}` : null,
+      telegram.trim() !== "" ? `tg · ${telegram.trim()}` : null,
+    ].filter((line): line is string => line !== null);
+
+    if (socials.length > 0) {
+      posts.push({ key: "links", label: "4 · the links", body: socials.join("\n") });
+    } else {
+      skipped.push("the links post — no website, X or Telegram is filled in.");
+    }
+
+    // Renumber so the labels match what is actually there (a skipped post leaves no gap).
+    const numbered = posts.map((p, i) => ({ ...p, label: `${i + 1} · ${p.label.split("· ")[1] ?? p.label}` }));
+    return { posts: numbered, skipped, joined: numbered.map((p) => p.body).join("\n\n") };
+  }, [name, symbol, description, devBuy, trimmedCa, caOk, website, twitter, telegram]);
+
+  /* ------------------------------------------------------- real state: launch registry */
+
+  const runRegistryCheck = useCallback(async () => {
+    setRegistry({ phase: "checking" });
+    try {
+      const res = await fetch("/api/registry?limit=200", { cache: "no-store" });
+      const body: unknown = await res.json();
+      if (!isRecord(body)) {
+        setRegistry({ phase: "error", detail: `the registry answered ${res.status} with something that is not an object` });
+        return;
+      }
+      if (body.configured === false) {
+        setRegistry({
+          phase: "unconfigured",
+          detail: asString(body.error) ?? "UPSTASH_REDIS_REST_URL / TOKEN are not set",
+        });
+        return;
+      }
+      if (!res.ok) {
+        setRegistry({
+          phase: "error",
+          detail: `the registry answered ${res.status}${asString(body.error) ? `: ${asString(body.error)}` : ""}`,
+        });
+        return;
+      }
+      const launches = Array.isArray(body.launches)
+        ? body.launches.map(parseLaunchRecord).filter((l): l is RegistryRecord => l !== null)
+        : [];
+      const wanted = ca.trim();
+      setRegistry({
+        phase: "ok",
+        total: asNumber(body.total) ?? launches.length,
+        count: asNumber(body.count) ?? launches.length,
+        match: wanted === "" ? null : launches.find((l) => l.mint === wanted) ?? null,
+      });
+    } catch (err) {
+      setRegistry({ phase: "error", detail: err instanceof Error ? err.message : "the request failed" });
+    }
+  }, [ca]);
+
+  // When a valid address is typed, read the registry once (debounced) — the two registry-backed
+  // items then reflect the platform's own record instead of asking for a manual tick.
+  useEffect(() => {
+    if (!isAddress(ca)) return;
+    const id = window.setTimeout(() => {
+      void runRegistryCheck();
+    }, 600);
+    return () => window.clearTimeout(id);
+  }, [ca, runRegistryCheck]);
+
+  /* ------------------------------------------------- real state: read the pin back */
+
+  const runPinCheck = useCallback(async () => {
+    const readUrl = pinReadUrl(pinUri);
+    if (readUrl === null) {
+      setPin({
+        phase: "unreadable",
+        readUrl: pinUri.trim(),
+        detail: "that is not an http(s) URL, an ipfs:// URI or a CID, so there is nothing to fetch",
+      });
+      return;
+    }
+    setPin({ phase: "checking", readUrl });
+    try {
+      const res = await fetch(readUrl, { cache: "no-store" });
+      const text = await res.text();
+      const bytes = byteLen(text);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setPin({
+          phase: "not-json",
+          readUrl,
+          status: res.status,
+          detail: `${text.slice(0, 80).replace(/\s+/g, " ")}…`,
+        });
+        return;
+      }
+      if (!isRecord(parsed)) {
+        setPin({ phase: "not-json", readUrl, status: res.status, detail: "the response parsed as JSON but is not an object" });
+        return;
+      }
+      setPin({
+        phase: "read",
+        readUrl,
+        status: res.status,
+        bytes,
+        keys: Object.keys(parsed),
+        name: asString(parsed.name),
+        symbol: asString(parsed.symbol),
+        showName: parsed.showName === true,
+      });
+    } catch (err) {
+      setPin({
+        phase: "unreadable",
+        readUrl,
+        detail: err instanceof Error ? err.message : "the request failed",
+      });
+    }
+  }, [pinUri]);
+
+  const pinMatches =
+    pin.phase === "read" &&
+    pin.name === name.trim() &&
+    pin.symbol === symbol.trim() &&
+    pin.name !== null &&
+    pin.symbol !== null;
+
+  /* ---------------------------------------------------------------------- checklist */
+
+  const registryMatch = registry.phase === "ok" ? registry.match : null;
+
+  const registryOutcome: { state: ItemState; label: string } = (() => {
+    if (registry.phase === "ok" && registryMatch) {
+      return {
+        state: "done",
+        label: registryMatch.mode === "sponsored" ? "recorded · treasury paid" : "recorded · a wallet sent it",
+      };
+    }
+    if (registry.phase === "ok") return { state: "open", label: "not in the registry yet" };
+    if (registry.phase === "unconfigured" || registry.phase === "error") {
+      return { state: "untracked", label: "not tracked here" };
+    }
+    return { state: "idle", label: "not checked yet" };
+  })();
+
+  const pinOutcome: { state: ItemState; label: string } = (() => {
+    if (pin.phase === "read" && pin.status < 400) {
+      return pinMatches
+        ? { state: "done", label: "read back · matches this coin" }
+        : { state: "open", label: "read back · does not match" };
+    }
+    if (pin.phase === "read") return { state: "open", label: `read back · HTTP ${pin.status}` };
+    if (pin.phase === "not-json") return { state: "open", label: `read back · not JSON (HTTP ${pin.status})` };
+    if (pin.phase === "unreadable") return { state: "untracked", label: "not verified here" };
+    if (pin.phase === "checking") return { state: "idle", label: "reading…" };
+    return { state: "idle", label: "not checked yet" };
+  })();
+
+  const shieldHref = caOk ? `/shield?mint=${trimmedCa}` : "/shield";
+  const splitsHref = caOk ? `/splits?mint=${trimmedCa}` : "/splits";
+
+  const items: CheckItem[] = [
     {
-      key: "metadata",
-      label: "Metadata valid",
-      done: metadataValid,
-      href: "#kit-metadata",
-      note: metadataValid
-        ? `name and ticker are inside the program's byte limits and the image is a fetchable URL.`
-        : "Finish the fields above: they are measured against the same limits the create instruction enforces.",
+      key: "grind",
+      n: 1,
+      label: "Grind your CA",
+      href: "/grinder",
+      openLabel: "open /grinder",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note:
+        caOk
+          ? `The Contract address field holds ${trimmedCa.slice(0, 4)}…${trimmedCa.slice(-4)} — this page can see that it is filled and valid, but not that the Grinder produced it: that tab generates the keypair in its own memory and stores nothing.`
+          : "The Grinder generates its keypair in that tab's memory and stores nothing — no localStorage, no cookie, no server record — so this page cannot see whether you ground an address, and it cannot prefill the field either.",
     },
     {
-      key: "mint",
-      label: "Vanity mint ground",
-      manual: true,
-      done: mintGround,
-      href: "/grinder",
-      note: "A ground mint is what makes the address recognisable — and what makes a copycat cheap to spot, because holders can compare both ends of the CA.",
+      key: "shield",
+      n: 2,
+      label: "Check your Vamp Shield score",
+      href: shieldHref,
+      openLabel: "open /shield",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note: caOk
+        ? "The link carries this kit's contract address as ?mint=, which is the field the Shield tab reads. The score is computed there from the address you give it and nothing is written back, so this page cannot tick it."
+        : "The score is computed in the Shield tab and nothing is written back, so this page cannot tick it. The link picks up the contract address above as soon as there is a valid one.",
+    },
+    {
+      key: "key",
+      n: 3,
+      label: "Back up the mint key (Vault or offline file)",
+      href: "/vault",
+      openLabel: "open /vault",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note: "The Vault holds the platform's treasury key server-side and never shows a private key; the mint key you ground lives only in the Grinder tab. Whether you saved it is not recorded anywhere this page can read.",
+    },
+    {
+      key: "simulate",
+      n: 4,
+      label: "Simulate your dev buy and wallets",
+      href: "/lab",
+      openLabel: "open /lab",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note:
+        devBuyError === null && devBuy.trim() !== ""
+          ? `The Launch Lab is client-side arithmetic on the bonding curve and writes nothing down, so there is no result here to read. The dev buy above (${devBuy.trim()} SOL) is not handed to it — type it there.`
+          : "The Launch Lab is client-side arithmetic on the bonding curve and writes nothing down, so there is no result here to read.",
     },
     {
       key: "splits",
-      label: "Fee split decided",
-      manual: true,
-      done: splitDecided,
-      href: "/splits",
-      note: "Up to 10 shareholders, basis points summing to 10,000. This platform's default is 70% creator / 30% platform, written on chain and permanent once set.",
+      n: 5,
+      label: "Set creator-fee splits",
+      href: splitsHref,
+      openLabel: "open /splits",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note: caOk
+        ? "The link carries ?mint=, which the Splits tab reads. The split is validated there to 10,000 bps and written on chain at launch — it is not stored in this browser, so this page cannot tick it."
+        : "The Splits tab validates the split to 10,000 bps and it is written on chain at launch — not stored in this browser, so this page cannot tick it. The link carries the contract address above once there is a valid one.",
     },
     {
-      key: "wallet",
-      label: "Wallet connected",
-      done: connected,
+      key: "pin",
+      n: 6,
+      label: "Pin the metadata",
       href: "/launch",
-      note: connected
-        ? "A wallet is connected in the header; the launch tab has a signer."
-        : "Connect from the header wallet button — the launch tab cannot sign without one.",
+      openLabel: "open /launch",
+      state: "untracked",
+      stateLabel: "not tracked here",
+      note: "The pin runs on the Launch tab, which prints the resulting URI in its build log and keeps no record this page can read. Paste that URI into item 7 below and the pin gets checked here for real.",
     },
     {
-      key: "send",
-      label: "Sending consciously enabled",
-      done: sendEnabled,
-      href: "/settings",
-      note: sendEnabled
-        ? "NEXT_PUBLIC_ENABLE_SEND=true in this environment: a prepared launch will actually submit."
-        : "This build prepares and simulates only. Nothing can be submitted until the environment switches sending on — which is the safe default.",
+      key: "pincheck",
+      n: 7,
+      label: "Check the pin landed",
+      href: null,
+      openLabel: "",
+      state: pinOutcome.state,
+      stateLabel: pinOutcome.label,
+      note: pinMatches
+        ? "The JSON at that URI came back through this browser and its name and ticker are this coin's — the pin landed."
+        : "Paste the metadata URI from the Launch tab's build log and press check: this page fetches it back through your browser, and the tick only appears if the pinned JSON comes back with this coin's name and ticker.",
+    },
+    {
+      key: "launch",
+      n: 8,
+      label: "Launch or hand over to the platform treasury",
+      href: "/launch",
+      openLabel: "open /launch",
+      state: registryOutcome.state,
+      stateLabel: registryOutcome.label,
+      note: registryMatch
+        ? `The launch registry has this mint: ${registryMatch.name || "—"} ($${registryMatch.symbol || "—"}), ${
+            registryMatch.mode === "sponsored" ? "sponsored by the treasury" : "sent from a wallet"
+          }, ${registryMatch.signatures.length} signature(s) on file. A record is only written after a transaction confirms, so that is a launch that really went out.`
+        : "The registry is written by the launch path only after a transaction confirms — a planned launch is never recorded. Press check the board to read it.",
+    },
+    {
+      key: "board",
+      n: 9,
+      label: "Import it on our own board",
+      href: "/launchlab",
+      openLabel: "open /launchlab",
+      state: registryOutcome.state,
+      stateLabel: registryOutcome.label,
+      note: registryMatch
+        ? "The board at /launchlab renders exactly what the registry holds, so this mint is on it — with its fee split and its live market data."
+        : "The board renders exactly what the registry holds, so the same record that answers item 8 answers this one: it is on the board when it was recorded there.",
     },
   ];
 
-  const doneCount = checklist.filter((c) => c.done).length;
+  const doneCount = items.filter((i) => i.state === "done").length;
+
+  const registryLine = (() => {
+    switch (registry.phase) {
+      case "idle":
+        return "not read yet — this asks /api/registry for the newest 200 records";
+      case "checking":
+        return "reading /api/registry…";
+      case "unconfigured":
+        return `the registry is not configured in this environment (${registry.detail})`;
+      case "error":
+        return `the registry read failed (${registry.detail})`;
+      case "ok":
+        return `${registry.count} of ${registry.total} record(s) read (newest first)`;
+    }
+  })();
 
   return (
     <div className="mt-6 space-y-3">
-      {/* ------------------------------------------------------- metadata builder */}
-      <Card className="p-4" id="kit-metadata">
-        <SectionTitle aside={`limits from the program: name ${METADATA_LIMITS.name} · ticker ${METADATA_LIMITS.symbol} · uri ${METADATA_LIMITS.uri} bytes`}>
-          Token metadata
-        </SectionTitle>
+      {/* ------------------------------------------------------------------ your coin */}
+
+      <Card className="p-4" id="kit-coin">
+        <SectionTitle aside={`${byteLen(json)} bytes of metadata so far`}>Your coin</SectionTitle>
         <p className="mt-2 text-xs leading-relaxed text-white/40">
-          Byte counters below come from the launch code itself, so they cannot disagree with what the
-          create instruction accepts. A ticker with an emoji or an accent is longer than it looks.
+          Fill it in once: the metadata file, the launch thread and the checklist links below are all
+          built from these fields. Template-based and local — no model, no network call, nothing leaves
+          this page until you copy or download it.
         </p>
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -262,14 +675,14 @@ export function KitClient() {
           </Field>
 
           <Field
-            id="kit-symbol"
+            id="kit-ticker"
             label={`Ticker (max ${METADATA_LIMITS.symbol} bytes)`}
             hint={`${byteLen(symbol)} / ${METADATA_LIMITS.symbol} bytes`}
             error={symbolError}
           >
             <input
-              id="kit-symbol"
-              name="symbol"
+              id="kit-ticker"
+              name="ticker"
               className={inputClass}
               autoComplete="off"
               spellCheck={false}
@@ -283,7 +696,7 @@ export function KitClient() {
             <Field
               id="kit-description"
               label="Description"
-              hint="Plain text. The pin step trims it and enforces its own cap; the program does not limit this field."
+              hint="Plain text. The pin step trims it; the program does not limit this field. It goes into the metadata file verbatim."
             >
               <textarea
                 id="kit-description"
@@ -296,174 +709,400 @@ export function KitClient() {
             </Field>
           </div>
 
-          <div className="sm:col-span-2">
-            <UrlField
-              id="kit-image"
-              label="Image URL (after upload)"
-              hint="Required by the pin step, which fetches this URL and re-hosts the image on IPFS — so it must be a link a server can read, not a file on your disk."
-              value={image}
-              onChange={setImage}
-            />
-          </div>
+          <UrlField
+            id="kit-image"
+            label="Image URL (after upload)"
+            hint="Required by the pin step, which fetches this URL and re-hosts the image on IPFS — so it has to be a link a server can read, not a file on disk."
+            value={image}
+            onChange={setImage}
+            className="sm:col-span-2"
+          />
 
           <UrlField
+            id="kit-website"
+            label="Website (optional)"
+            hint="Left empty, the key is left out of the metadata file entirely."
+            value={website}
+            onChange={setWebsite}
+          />
+          <UrlField
             id="kit-twitter"
-            label="X / Twitter (optional)"
-            hint="Left empty, the field is left out of the JSON entirely."
+            label="X (optional)"
+            hint="Left empty, the key is left out of the metadata file entirely."
             value={twitter}
             onChange={setTwitter}
           />
           <UrlField
             id="kit-telegram"
             label="Telegram (optional)"
-            hint="Left empty, the field is left out of the JSON entirely."
+            hint="Left empty, the key is left out of the metadata file entirely."
             value={telegram}
             onChange={setTelegram}
           />
-          <UrlField
-            id="kit-website"
-            label="Website (optional)"
-            hint="Left empty, the field is left out of the JSON entirely."
-            value={website}
-            onChange={setWebsite}
-          />
 
-          <div className="sm:col-span-2">
+          <div className="min-w-0">
             <Field
-              id="kit-uri"
-              label={`Metadata URI (optional, max ${METADATA_LIMITS.uri} bytes)`}
-              hint={`${byteLen(uri)} / ${METADATA_LIMITS.uri} bytes · the ipfs:// or https:// URI that goes into the create as its \`uri\` — this one is not part of the JSON below.`}
-              error={uriError}
+              id="kit-ca"
+              label="Contract address (use last grinded)"
+              hint={
+                caOk
+                  ? `${trimmedCa.slice(0, 4)}…${trimmedCa.slice(-4)} · valid base58 — the pump.fun link and the Shield/Splits deep links follow it`
+                  : "the mint the Grinder produced, or any base58 mint address"
+              }
+              error={caError}
             >
               <input
-                id="kit-uri"
-                name="uri"
+                id="kit-ca"
+                name="ca"
                 className={`${inputClass} font-mono text-xs`}
                 autoComplete="off"
                 spellCheck={false}
-                aria-invalid={uriIssue !== null}
-                placeholder="ipfs://… or https://gateway…/ipfs/…"
-                value={uri}
-                onChange={(e) => setUri(e.target.value)}
+                aria-invalid={caError !== null}
+                placeholder="paste the ground mint"
+                value={ca}
+                onChange={(e) => setCa(e.target.value)}
               />
             </Field>
           </div>
+
+          <div className="min-w-0">
+            <Field
+              id="kit-devbuy"
+              label="Dev buy (SOL, optional)"
+              hint="Not part of the metadata file — it is a buy, not a field. It appears in thread post 2 and is what you type into the Launch Lab."
+              error={devBuyError}
+            >
+              <input
+                id="kit-devbuy"
+                name="devBuy"
+                className={`${inputClass} tabular`}
+                autoComplete="off"
+                inputMode="decimal"
+                aria-invalid={devBuyError !== null}
+                placeholder="e.g. 1.5"
+                value={devBuy}
+                onChange={(e) => setDevBuy(e.target.value)}
+              />
+            </Field>
+          </div>
+
+          {caOk ? (
+            <div className="min-w-0 sm:col-span-2">
+              <div className="rounded-md border border-white/10 bg-white/[0.015] p-3">
+                <p className="text-xs text-white/55">The coin page for that address</p>
+                <a
+                  href={tokenLinks(trimmedCa).pumpFun}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 block break-all font-mono text-[11px] text-white/70 underline decoration-white/20 underline-offset-2 transition-colors hover:decoration-white/60"
+                >
+                  {tokenLinks(trimmedCa).pumpFun}
+                </a>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-white/35">
+                  Built from the address above, the same way src/lib/links.ts builds it for the rest of
+                  the app. It answers only after the coin exists on chain.
+                </p>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-3">
+          <Alert tone="info" title="Why the contract address is not prefilled">
+            The Grinder generates its keypair in that tab&apos;s memory and stores nothing — no{" "}
+            <span className="font-mono">localStorage</span>, no cookie, no server record — so no other
+            tab can read the mint it produced. This field stays empty and says so, rather than guessing
+            from a pattern.
+          </Alert>
         </div>
       </Card>
 
-      {/* ------------------------------------------------------------ JSON preview */}
-      <Card className="p-4">
-        <SectionTitle aside={`${byteLen(json)} bytes`}>Metadata file</SectionTitle>
+      {/* -------------------------------------------------------------- metadata file */}
+
+      <Card className="p-4" id="kit-metadata">
+        <SectionTitle aside={metadataReady ? `${byteLen(json)} bytes · ready to export` : "needs a name and a ticker"}>
+          Metadata file
+        </SectionTitle>
         <p className="mt-2 text-xs leading-relaxed text-white/40">
-          This is the object that gets pinned — nothing added, nothing hidden. Optional fields appear
-          only when they have a value, so an empty one is not written as a blank string.
+          The shape src/lib/pinata.ts writes when it pins, minus the{" "}
+          <span className="font-mono">showName: true</span> that the pin route adds itself. An optional
+          key with no value is left out rather than written as an empty string.
         </p>
 
-        <pre className="mt-3 max-h-80 overflow-auto rounded-md border border-white/10 bg-white/[0.015] p-3 font-mono text-xs leading-relaxed text-white/70">
+        <pre className="mt-3 max-h-80 overflow-auto rounded-md border border-white/10 bg-white/[0.015] p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-white/70">
           {json}
         </pre>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="primary"
-            onClick={copyJson}
-            disabled={exportBlocked}
-            title={exportBlocked ? "Needs a name and a ticker inside the byte limits" : "Copy the JSON to the clipboard"}
-          >
-            {copied === "ok" ? "Copied" : "Copy JSON"}
-          </Button>
+          <CopyButton
+            text={json}
+            label="Copy JSON"
+            disabled={!metadataReady}
+            title={metadataReady ? "Copy the metadata JSON" : "Needs a name and a ticker inside the byte limits"}
+          />
           <Button
             type="button"
             variant="secondary"
+            size="sm"
             onClick={downloadJson}
-            disabled={exportBlocked}
-            title={exportBlocked ? "Needs a name and a ticker inside the byte limits" : "Download as a .json file"}
+            disabled={!metadataReady}
+            title={metadataReady ? `Save ${filename}` : "Needs a name and a ticker inside the byte limits"}
           >
-            Download .json
+            Download {filename}
           </Button>
           <span aria-live="polite" className="text-[11px] text-white/40">
-            {exportBlocked
-              ? "A name and a ticker are required before this can be exported."
-              : copied === "ok"
-                ? "Copied to the clipboard."
-                : copied === "failed"
-                  ? "Copying was blocked by the browser — select the JSON above and copy it manually."
-                  : ""}
+            {downloadNote ??
+              (metadataReady
+                ? "the file name follows the ticker; nothing is uploaded from here"
+                : "a name and a ticker inside the byte limits are required before this can be exported")}
           </span>
         </div>
 
         <p className="mt-3 text-[11px] leading-relaxed text-white/40">
-          The file name follows the ticker ({symbol.trim() ? `${symbol.trim().toLowerCase().replace(/[^a-z0-9]+/g, "") || "token"}-metadata.json` : "token-metadata.json"}).
-          Upload it to IPFS (or a pinning service) and use its URI at launch; the pin step in this app
-          does both the image and this file, and also writes <code className="font-mono">showName: true</code>{" "}
-          alongside these fields.
+          Upload this file to IPFS (or a pinning service) or let the Launch tab pin it, and the URI that
+          comes back is the <span className="font-mono">uri</span> of the create transaction. The image
+          URL above is pinned separately, and the metadata file points at the IPFS copy of it.
         </p>
       </Card>
 
-      {/* ----------------------------------------------------------------- checklist */}
-      <Card className="p-4" id="kit-checklist">
-        <SectionTitle aside={`${doneCount}/${checklist.length} done`}>Checklist</SectionTitle>
+      {/* ------------------------------------------------------------- launch thread */}
+
+      <Card className="p-4" id="kit-thread">
+        <SectionTitle
+          aside={`${thread.posts.length} post(s) · ${charCount(thread.joined)} characters`}
+        >
+          Launch thread
+        </SectionTitle>
         <p className="mt-2 text-xs leading-relaxed text-white/40">
-          Three of these this page can see for itself (metadata, wallet, the send gate). The other two
-          happen in their own tabs, so they are yours to tick.
+          A template, not a model: every line below is your fields with fixed wording around them, and a
+          post that has nothing to say is left out. X allows 280 characters per post on a standard
+          account — the counter is Unicode code points, which is how X counts them.
         </p>
 
-        <ul className="mt-3">
-          {checklist.map((item) => (
-            <li key={item.key} className="flex items-start gap-3 border-t border-white/10 py-3 first:border-t-0">
-              {item.manual ? (
-                <input
-                  id={`kit-check-${item.key}`}
-                  name={`check-${item.key}`}
-                  type="checkbox"
-                  checked={item.done}
-                  onChange={(e) => (item.key === "mint" ? setMintGround(e.target.checked) : setSplitDecided(e.target.checked))}
-                  className="mt-1 h-4 w-4 shrink-0 cursor-pointer accent-[#5e6ad2] transition-colors hover:accent-[#4f59b8] active:accent-[#4650a8]"
-                />
-              ) : (
+        {thread.posts.length === 0 ? (
+          <p className="mt-3 text-xs text-white/45">
+            Nothing to write yet — the thread needs at least a name and a ticker.
+          </p>
+        ) : (
+          <ol className="mt-3 space-y-3">
+            {thread.posts.map((post) => {
+              const chars = charCount(post.body);
+              const over = chars > 280;
+              return (
+                <li key={post.key} className="rounded-md border border-white/10 bg-white/[0.015] p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="text-xs text-white/60">{post.label}</span>
+                    <span className={`font-mono text-[11px] tabular ${over ? "text-amber-300" : "text-white/40"}`}>
+                      {chars} / 280{over ? " — over the limit" : ""}
+                    </span>
+                  </div>
+                  <pre className="mt-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-white/70">
+                    {post.body}
+                  </pre>
+                  <div className="mt-2">
+                    <CopyButton text={post.body} label="copy post" />
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        {thread.skipped.length > 0 ? (
+          <div className="mt-3">
+            <Alert tone="info" title="Left out of the thread — nothing was invented to fill the gap">
+              <ul className="list-disc space-y-0.5 pl-4">
+                {thread.skipped.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </Alert>
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <CopyButton
+            text={thread.joined}
+            label="Copy whole thread"
+            disabled={thread.posts.length === 0}
+            title={thread.posts.length === 0 ? "Nothing to copy yet" : "Copy every post, separated by a blank line"}
+          />
+          <span className="text-[11px] text-white/40">
+            posts are joined with a blank line; paste one post at a time if the composer prefers it
+          </span>
+        </div>
+      </Card>
+
+      {/* ------------------------------------------------------------------ checklist */}
+
+      <Card className="p-4" id="kit-checklist">
+        <SectionTitle aside={`${doneCount}/${items.length} done · ${items.length} steps`}>Checklist</SectionTitle>
+        <p className="mt-2 text-xs leading-relaxed text-white/40">
+          Nine steps, each linked to the tab that does it. A tick appears only where this page can read
+          real state — the launch registry for the last two, a read-back of the pinned file for item 7.
+          Anywhere the app keeps no record, the item says <span className="font-mono">not tracked here</span> instead
+          of offering a checkbox that does nothing.
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => void runRegistryCheck()}
+            disabled={registry.phase === "checking"}
+          >
+            {registry.phase === "checking" ? "Reading the registry…" : "Check the board"}
+          </Button>
+          <span aria-live="polite" className="text-[11px] text-white/40">
+            {registryLine}
+          </span>
+        </div>
+
+        <ol className="mt-3">
+          {items.map((item) => (
+            <li key={item.key} className="border-t border-white/10 py-3 first:border-t-0">
+              <div className="flex items-start gap-3">
                 <span
                   aria-hidden
-                  className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] ${
-                    item.done
+                  className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border font-mono text-[10px] tabular ${
+                    item.state === "done"
                       ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                      : "border-white/20 text-white/30"
+                      : "border-white/15 text-white/45"
                   }`}
                 >
-                  {item.done ? "✓" : "○"}
+                  {item.n}
                 </span>
-              )}
 
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                  {item.manual ? (
-                    <label htmlFor={`kit-check-${item.key}`} className="text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1.5">
+                    <p className="text-sm">
                       {item.label}
-                    </label>
-                  ) : (
-                    <span className="text-sm">
-                      {item.label}
-                      <span className="sr-only">{item.done ? " — done" : " — not done yet"}</span>
-                    </span>
-                  )}
-                  <LinkButton href={item.href} size="sm" variant="ghost">
-                    open →
-                  </LinkButton>
+                      <span className="sr-only"> — {item.stateLabel}</span>
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StateChip state={item.state} label={item.stateLabel} />
+                      {item.href ? (
+                        <LinkButton href={item.href} size="sm" variant="ghost">
+                          {item.openLabel}
+                        </LinkButton>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <p className="mt-1 text-xs leading-relaxed text-white/40">{item.note}</p>
+
+                  {item.key === "pincheck" ? (
+                    <div className="mt-2 rounded-md border border-white/10 bg-white/[0.015] p-3">
+                      <Field
+                        id="kit-pin-uri"
+                        label="Metadata URI (from the Launch tab's build log)"
+                        hint="ipfs://<cid>, a https gateway URL, or a bare CID."
+                      >
+                        <div className="flex flex-wrap gap-2">
+                          <input
+                            id="kit-pin-uri"
+                            name="pinUri"
+                            className={`${inputClass} min-w-0 flex-1 font-mono text-xs`}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder="ipfs://… or https://gateway.pinata.cloud/ipfs/…"
+                            value={pinUri}
+                            onChange={(e) => setPinUri(e.target.value)}
+                          />
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={() => void runPinCheck()}
+                            disabled={pin.phase === "checking"}
+                          >
+                            {pin.phase === "checking" ? "Reading…" : "Check the pin"}
+                          </Button>
+                        </div>
+                      </Field>
+
+                      {pin.phase === "checking" ? (
+                        <p className="mt-2 text-[11px] text-white/40">
+                          fetching <span className="break-all font-mono">{pin.readUrl}</span> from this browser…
+                        </p>
+                      ) : null}
+
+                      {pin.phase === "unreadable" ? (
+                        <div className="mt-2">
+                          <Alert tone="warn" title="Nothing was read back">
+                            {pin.detail}. A failed read is not proof the pin is missing — it usually means
+                            the gateway refused a browser cross-origin read, the CID is wrong, or the
+                            network is down. No tick is shown either way.
+                          </Alert>
+                        </div>
+                      ) : null}
+
+                      {pin.phase === "not-json" ? (
+                        <div className="mt-2">
+                          <Alert tone="warn" title={`HTTP ${pin.status} — what came back is not a metadata file`}>
+                            The response was not JSON. First 80 characters:{" "}
+                            <span className="break-all font-mono">{pin.detail}</span>
+                          </Alert>
+                        </div>
+                      ) : null}
+
+                      {pin.phase === "read" ? (
+                        <dl className="mt-2 space-y-1 text-[11px] leading-relaxed text-white/55">
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">HTTP status</dt>
+                            <dd className="tabular">{pin.status}</dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">Body</dt>
+                            <dd className="tabular">{pin.bytes} bytes of JSON</dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">name</dt>
+                            <dd>{pin.name === null ? "— (key not present)" : pin.name}</dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">symbol</dt>
+                            <dd>{pin.symbol === null ? "— (key not present)" : pin.symbol}</dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">keys present</dt>
+                            <dd className="break-all font-mono">{pin.keys.length > 0 ? pin.keys.join(", ") : "—"}</dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">showName</dt>
+                            <dd>
+                              {pin.showName
+                                ? "true — the pin route added it"
+                                : "not in what came back, so this pin did not come from the pin route's own writer"}
+                            </dd>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2">
+                            <dt className="text-white/40">verdict</dt>
+                            <dd className={pinMatches ? "text-emerald-300" : "text-amber-300"}>
+                              {pinMatches
+                                ? "this is this coin's metadata file"
+                                : "name or ticker do not match the fields above"}
+                            </dd>
+                          </div>
+                        </dl>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
-                <p className="mt-0.5 text-xs leading-relaxed text-white/40">{item.note}</p>
               </div>
             </li>
           ))}
-        </ul>
+        </ol>
       </Card>
 
-      {/* --------------------------------------------------------------- call to action */}
+      {/* --------------------------------------------------------------- what ships */}
+
       <Card className="p-4">
-        <SectionTitle aside="the ticket is the metadata URI">Ready to launch?</SectionTitle>
+        <SectionTitle aside="the ticket is the metadata URI">Ship it</SectionTitle>
         <p className="mt-2 text-sm leading-relaxed text-white/60">
-          The launch tab takes this coin the rest of the way: it pins the image and this metadata file,
+          The Launch tab takes this coin the rest of the way: it pins the image and the metadata file,
           builds the create against the real pump.fun program, simulates it, and only then asks for a
-          signature. Come back here if a field turns red — the byte counts above are the same ones the
+          signature. Come back here when a field goes red — the byte counts above are the same ones the
           create instruction applies.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -473,6 +1112,9 @@ export function KitClient() {
           <LinkButton href="/lab" variant="secondary" size="md">
             Simulate it in the Launch Lab
           </LinkButton>
+          <LinkButton href="/launchlab" variant="secondary" size="md">
+            See the board
+          </LinkButton>
         </div>
         {sendEnabled ? (
           <div className="mt-3">
@@ -481,7 +1123,12 @@ export function KitClient() {
               and the dev buy once more before you sign.
             </Alert>
           </div>
-        ) : null}
+        ) : (
+          <p className="mt-3 text-[11px] leading-relaxed text-white/40">
+            This build prepares and simulates only: NEXT_PUBLIC_ENABLE_SEND is not &quot;true&quot;, so
+            nothing can be submitted from any tab — the safe default.
+          </p>
+        )}
       </Card>
     </div>
   );

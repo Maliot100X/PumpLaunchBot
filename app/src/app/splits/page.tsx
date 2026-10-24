@@ -1,23 +1,22 @@
-"use client";
-
 import { Suspense } from "react";
 import { Alert, PageHeader, Skeleton } from "@/components/ui";
 import { SplitsStudio } from "./splits-client";
 
 /**
- * /splits — Fee Splits Studio.
+ * /splits — Creator rewards.
  *
- * The page is a client component because the studio reads the share link's query string with
+ * A server shell, so the title and the permanence warning are part of the prerendered page and paint
+ * before any JavaScript runs. `SplitsStudio` reads the share link out of the query string with
  * `useSearchParams`, which Next refuses to prerender outside a <Suspense> boundary
- * ("useSearchParams() should be wrapped in a suspense boundary at page /splits"). The boundary is
- * also the honest behaviour: the title and the permanence warning paint immediately, and the
- * interactive studio hydrates into the shell.
+ * ("useSearchParams() should be wrapped in a suspense boundary at page /splits") — and wrapping it
+ * is also the honest shape: the static copy is immediate, the interactive studio hydrates into it.
+ * That is the whole reason this page is not `export const dynamic` (which cacheComponents rejects).
  */
-function SplitsFallback() {
+function StudioFallback() {
   return (
     <div className="space-y-3">
-      <Skeleton className="h-56" />
-      <Skeleton className="h-44" />
+      <Skeleton className="h-64" />
+      <Skeleton className="h-48" />
     </div>
   );
 }
@@ -25,23 +24,21 @@ function SplitsFallback() {
 export default function SplitsPage() {
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
-      <PageHeader title="Fee Splits Studio">
-        Build a creator-fee split with the program&apos;s own rules checked as you type — at most ten
-        shareholders, a valid address each, no duplicates, every share above zero, and a total of exactly
-        10,000 basis points. Then export the JSON or send the split as a link.
+      <PageHeader title="Creator rewards">
+        Split fees without the spreadsheet. Up to 10 shareholders, validated addresses, exact basis
+        points. Export the JSON or send the link to your team.
       </PageHeader>
 
       <div className="mt-6">
-        <Alert tone="warn" title="This split is permanent the moment it is sent">
+        <Alert tone="warn" title="A split is permanent the moment it is sent">
           <span className="font-mono text-[11px]">update_fee_shares_v2</span> sets the final shareholder
-          list and revokes the admin in the same call, so a split sent from here can never be edited,
-          corrected or reversed afterwards. The recipients and their exact basis points are permanent
-          on-chain — it has to be right before it is signed.
+          list and revokes the admin in the same call, so the recipients and their exact basis points
+          are fixed on-chain the first time. It has to be right before it is signed.
         </Alert>
       </div>
 
       <div className="mt-6">
-        <Suspense fallback={<SplitsFallback />}>
+        <Suspense fallback={<StudioFallback />}>
           <SplitsStudio />
         </Suspense>
       </div>

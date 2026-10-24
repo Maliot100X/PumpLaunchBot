@@ -50,8 +50,21 @@ export type GrindResult = {
 };
 
 /** Characters that can appear in base58 (Bitcoin alphabet, no 0/O/I/l). */
-const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+export const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 export const BASE58_SIZE = BASE58_ALPHABET.length; // 58
+
+/**
+ * Baseline throughput of this engine's main-thread loop, used for time estimates BEFORE a run has
+ * produced a measurement of its own (the /grinder expectations table).
+ *
+ * Where the number comes from: the same source the UI and the test read at runtime — the engine's
+ * own progress rate, attempts ÷ elapsed × 1000 (see onProgress below). Measured with a 4 s
+ * grindVanity() run of this file on the build host: 3,510 /s (two consecutive runs: 3,510 and
+ * 3,460). The header comment's 4,941 came from an earlier, quieter run of the same loop, so the
+ * constant is deliberately the lower, reproducible figure. The tab replaces it with the device's
+ * own measured rate as soon as the first grind reports one.
+ */
+export const BROWSER_KEYPAIRS_PER_SECOND = 3_500;
 
 export class VanityError extends Error {}
 
@@ -70,6 +83,20 @@ export function validatePattern(prefix: string, suffix: string): void {
       `a ${all.length}-character pattern is ${(BASE58_SIZE ** all.length).toExponential(1)} combinations — ` +
         `pick 6 or fewer, or run it as a background job`,
     );
+  }
+}
+
+/**
+ * Null when the engine would run this pattern, otherwise the reason it would refuse — the engine's
+ * own wording, so a caller (the /grinder expectations table) can explain a refusal without
+ * re-stating the rules and drifting from them.
+ */
+export function patternRefusal(prefix: string, suffix: string): string | null {
+  try {
+    validatePattern(prefix, suffix);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : "invalid pattern";
   }
 }
 
